@@ -3,19 +3,29 @@ import bcrypt from 'bcryptjs'
 
 const userSchema = new mongoose.Schema(
   {
-    name:     { type: String, required: true, trim: true },
+    // ✅ Name optional (unit users-ku venaam)
+    name:     { type: String, trim: true, default: '' },
+
     email:    { type: String, required: true, unique: true, lowercase: true },
     password: { type: String, required: true, minlength: 6 },
-    role:     {
+
+    role: {
       type: String,
       enum: ['md', 'md_finance', 'ceo', 'admin'],
       default: 'admin',
     },
+
+    // ✅ Unit-based user-ku unitNo mandatory (admin role-ku)
     unitNo:   { type: String, default: null },
     active:   { type: Boolean, default: true },
 
     // ✅ Super MD protection
     isSuperMD: { type: Boolean, default: false },
+
+    // ✅ Unit user flag (unit email + pass shared by staff)
+    isUnitUser: { type: Boolean, default: false },
+
+    mustChangePassword: { type: Boolean, default: false },   // ✅ ADD
 
     // ✅ Who created this account
     createdBy: {
@@ -27,9 +37,7 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 )
 
-// ============================================================
-// ✅ FIX — No next callback (Mongoose 7+)
-// ============================================================
+// ✅ Hash password (Mongoose 7+ style)
 userSchema.pre('save', async function () {
   if (!this.isModified('password')) return
   this.password = await bcrypt.hash(this.password, 10)

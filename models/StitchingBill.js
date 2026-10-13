@@ -2,19 +2,28 @@ import mongoose from 'mongoose'
 
 const stitchingBillSchema = new mongoose.Schema(
   {
-    // Bill Info
+    // ============ Bill Info ============
     billNo:  { type: String, required: true, unique: true, index: true },
-    unitNo:  { type: String, required: true },     // "001", "002", "003"
+    unitNo:  { type: String, required: true, index: true },
 
-    // Customer
+    // ============ Customer Info ============
+    customerNo:     { type: String, required: true, index: true },   // ✅ NEW — 101, 199, 1100
     customerName:   { type: String, required: true, trim: true },
     customerMobile: { type: String, required: true, match: /^[0-9]{10}$/ },
 
-    // Order
-    orderPhoto:  { type: String, default: null },  // Cloudinary URL
+    // ============ Loyalty ============
+    loyaltyPoints: { type: Number, default: 0 },   // ✅ NEW
+
+    // ============ Order ============
+    orderPhoto:   { type: String, default: null },     // Cloudinary URL
+    orderPhotoId: { type: String, default: null },     // ✅ NEW — Cloudinary public_id
+
+    referencePhoto:   { type: String, default: null }, // ✅ NEW — optional
+    referencePhotoId: { type: String, default: null }, // ✅ NEW
+
     description: { type: String, default: '' },
 
-    // 18 Measurements
+    // ============ 18 Measurements ============
     measurements: {
       fullLength:     { type: Number, default: 0 },
       shoulder:       { type: Number, default: 0 },
@@ -36,30 +45,40 @@ const stitchingBillSchema = new mongoose.Schema(
       pantFullLength: { type: Number, default: 0 },
     },
 
-    // Customization (free text)
     customization: { type: String, default: '' },
 
-    // Amount
+    // ============ Amount ============
     amount:  { type: Number, required: true },
     total:   { type: Number, required: true },
     advance: { type: Number, default: 0 },
     balance: { type: Number, default: 0 },
 
-    // Payment
+    // ============ Payment ============
     paymentMode: { type: String, enum: ['cash', 'gpay'], default: 'cash' },
 
-    // Delivery
+    // ✅ NEW — Payment reference
+    paymentReference: {
+      cashDenominations: [
+        {
+          denomination: { type: Number },   // 500, 200, 100, 50, 20, 10
+          count:        { type: Number, default: 0 },
+        },
+      ],
+      gpayReference: { type: String, default: '' },
+    },
+
+    // ============ Delivery ============
     deliveryDate: { type: Date, required: true },
 
-    // Status
+    // ============ Status ============
     status: {
       type: String,
       enum: ['received', 'processing', 'ready', 'delivered', 'alteration'],
       default: 'received',
     },
 
-    // Bill By
-    billBy: { type: String, required: true },
+    // ============ Bill By (free text) ============
+    billBy: { type: String, required: true, trim: true },
   },
   { timestamps: true }
 )

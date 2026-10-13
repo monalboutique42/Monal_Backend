@@ -33,6 +33,7 @@ router.post('/login', async (req, res) => {
       email: user.email,
       role: user.role,
       unitNo: user.unitNo,
+      isSuperMD: user.isSuperMD,
       token: genToken(user._id),
     })
   } catch (err) {

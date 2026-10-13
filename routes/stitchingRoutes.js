@@ -2,8 +2,7 @@ import express from 'express'
 import multer from 'multer'
 import { v2 as cloudinary } from 'cloudinary'
 import StitchingBill from '../models/StitchingBill.js'
-import { protect, restrictToUnit } from '../middleware/auth.js'
-
+import { protect } from '../middleware/auth.js'
 
 const router = express.Router()
 
@@ -17,7 +16,7 @@ cloudinary.config({
 })
 
 // ============================================================
-// MULTER — memory storage (buffer in RAM, then upload to Cloudinary)
+// MULTER — memory storage
 // ============================================================
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -25,8 +24,7 @@ const upload = multer({
 })
 
 // ============================================================
-// Helper: Upload buffer to Cloudinary via UNSIGNED upload
-// (upload_stream 403 varudhu on free plan, so unsigned_upload use pandrom)
+// Helper: Upload buffer to Cloudinary (unsigned)
 // ============================================================
 const uploadToCloudinary = async (buffer) => {
   const base64 = buffer.toString('base64')
@@ -42,31 +40,54 @@ const uploadToCloudinary = async (buffer) => {
 }
 
 // ============================================================
-// Middleware: Handle single photo upload safely
+// Helper: Delete Cloudinary image by public_id
 // ============================================================
-const uploadSinglePhoto = (req, res, next) => {
-  upload.single('orderPhoto')(req, res, async (err) => {
+const deleteFromCloudinary = async (publicId) => {
+  if (!publicId) return
+  try {
+    await cloudinary.uploader.destroy(publicId)
+    console.log('🗑️  Deleted from Cloudinary:', publicId)
+  } catch (err) {
+    console.error('⚠️  Cloudinary delete failed:', err.message)
+  }
+}
+
+// ============================================================
+// Middleware: Handle both order + reference photo uploads
+// ============================================================
+const uploadPhotos = (req, res, next) => {
+  const uploadFields = upload.fields([
+    { name: 'orderPhoto',     maxCount: 1 },
+    { name: 'referencePhoto', maxCount: 1 },
+  ])
+
+  uploadFields(req, res, async (err) => {
     if (err) {
       console.error('❌ Multer error:', err.message)
-      return res.status(500).json({
-        message: err.message || 'File upload failed',
-      })
+      return res.status(500).json({ message: err.message || 'File upload failed' })
     }
 
-    // No file uploaded — skip
-    if (!req.file) return next()
-
-    // Upload buffer to Cloudinary
     try {
-      console.log('📤 Uploading to Cloudinary (unsigned)...')
-      console.log('   File:', req.file.originalname, req.file.size, 'bytes')
+      // Upload order photo (mandatory if provided)
+      if (req.files?.orderPhoto?.[0]) {
+        const file = req.files.orderPhoto[0]
+        console.log('📤 Uploading order photo:', file.originalname, file.size, 'bytes')
+        const result = await uploadToCloudinary(file.buffer)
+        req.orderPhotoUrl = result.secure_url
+        req.orderPhotoId  = result.public_id
+        console.log('✅ Order photo uploaded:', result.secure_url)
+      }
 
-      const result = await uploadToCloudinary(req.file.buffer)
+      // Upload reference photo (optional)
+      if (req.files?.referencePhoto?.[0]) {
+        const file = req.files.referencePhoto[0]
+        console.log('📤 Uploading reference photo:', file.originalname, file.size, 'bytes')
+        const result = await uploadToCloudinary(file.buffer)
+        req.referencePhotoUrl = result.secure_url
+        req.referencePhotoId  = result.public_id
+        console.log('✅ Reference photo uploaded:', result.secure_url)
+      }
 
-      console.log('✅ Cloudinary upload OK:', result.secure_url)
-
-      req.file.path = result.secure_url
-      req.file.cloudinaryResult = result
       next()
     } catch (cloudErr) {
       console.error('❌ Cloudinary upload FAIL:', cloudErr.message)
@@ -78,9 +99,8 @@ const uploadSinglePhoto = (req, res, next) => {
 }
 
 // ============================================================
-// HELPER: Generate Bill No
+// HELPER: Generate Stitching Bill No
 // Format: YYYY + MM + UnitNo(3) + BillNo(3)
-// Example: 202610001001
 // ============================================================
 async function generateBillNo(unitNo) {
   const now = new Date()
@@ -88,7 +108,7 @@ async function generateBillNo(unitNo) {
   const month = (now.getMonth() + 1).toString().padStart(2, '0')
   const unit  = (unitNo || '001').padStart(3, '0')
 
-  const prefix = `${year}${month}${unit}` // 202610001
+  const prefix = `${year}${month}${unit}`
 
   const lastBill = await StitchingBill
     .findOne({ billNo: { $regex: `^${prefix}` } })
@@ -105,9 +125,56 @@ async function generateBillNo(unitNo) {
 }
 
 // ============================================================
+// HELPER: Generate Customer No
+// Format: <unitNo> + <seq>    Example: 101, 199, 1100
+// ============================================================
+async function generateCustomerNo(unitNo) {
+  const unit = (unitNo || '1').replace(/^0+/, '')   // "001" → "1"
+
+  // Find all customer numbers starting with this unit
+  const prefix = unit
+  const bills = await StitchingBill
+    .find({ customerNo: { $regex: `^${prefix}` } })
+    .select('customerNo')
+
+  // Extract sequence numbers
+  let maxSeq = 0
+  bills.forEach((b) => {
+    const seqStr = b.customerNo.slice(prefix.length)
+    const seq = parseInt(seqStr, 10)
+    if (!isNaN(seq) && seq > maxSeq) maxSeq = seq
+  })
+
+  const nextSeq = maxSeq + 1
+  const seqStr = nextSeq.toString().padStart(2, '0')   // "01", "99", "100"
+
+  return `${unit}${seqStr}`   // "101", "199", "1100"
+}
+
+// ============================================================
+// HELPER: Find most recent bill by customerNo
+// ============================================================
+async function findCustomerByNo(customerNo) {
+  if (!customerNo) return null
+  const bill = await StitchingBill
+    .findOne({ customerNo: customerNo.trim() })
+    .sort({ createdAt: -1 })
+  return bill
+}
+
+// ============================================================
+// HELPER: Calculate total loyalty points for a customer
+// ============================================================
+async function getLoyaltyPoints(customerNo) {
+  if (!customerNo) return 0
+  const bills = await StitchingBill.find({ customerNo: customerNo.trim() })
+  return bills.length * 5   // 1 bill = 5 points
+}
+
+// ============================================================
 // GET /stitching/next-bill-no
 // ============================================================
-router.get('/next-bill-no', async (req, res) => {
+router.get('/next-bill-no', protect, async (req, res) => {
   try {
     const { unitNo } = req.query
     if (!unitNo) return res.status(400).json({ message: 'unitNo required' })
@@ -120,17 +187,123 @@ router.get('/next-bill-no', async (req, res) => {
 })
 
 // ============================================================
-// GET /stitching (list + filter)
+// GET /stitching/customer/:customerNo
+// Get customer info (auto-fill) + loyalty points
 // ============================================================
-router.get('/', async (req, res) => {
+router.get('/customer/:customerNo', protect, async (req, res) => {
+  try {
+    const customerNo = req.params.customerNo?.trim()
+    if (!customerNo) {
+      return res.status(400).json({ message: 'customerNo required' })
+    }
+
+    const lastBill = await findCustomerByNo(customerNo)
+    const loyaltyPoints = await getLoyaltyPoints(customerNo)
+
+    if (!lastBill) {
+      return res.json({
+        found: false,
+        loyaltyPoints: 0,
+      })
+    }
+
+    res.json({
+      found: true,
+      loyaltyPoints,
+      customer: {
+        customerNo:     lastBill.customerNo,
+        customerName:   lastBill.customerName,
+        customerMobile: lastBill.customerMobile,
+        measurements:   lastBill.measurements,
+        customization:  lastBill.customization,
+        description:    lastBill.description,
+      },
+    })
+  } catch (err) {
+    console.error('❌ GET /stitching/customer/:customerNo error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching/next-customer-no
+// Auto-generate next customer number for a unit
+// ============================================================
+router.get('/next-customer-no', protect, async (req, res) => {
+  try {
+    const { unitNo } = req.query
+    if (!unitNo) return res.status(400).json({ message: 'unitNo required' })
+    const customerNo = await generateCustomerNo(unitNo)
+    res.json({ customerNo })
+  } catch (err) {
+    console.error('❌ GET next-customer-no error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching/reminders
+// Role check: Admin BLOCKED, only MD/CEO/MD Finance
+// ============================================================
+router.get('/reminders', protect, async (req, res) => {
+  try {
+    // ✅ Admin blocked
+    if (req.user.role === 'admin') {
+      return res.status(403).json({
+        message: 'Reminders are not available for admin role',
+      })
+    }
+
+    const { unitNo } = req.query
+
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setHours(0, 0, 0, 0)
+
+    const dayAfter = new Date(tomorrow)
+    dayAfter.setDate(dayAfter.getDate() + 1)
+
+    const filter = {
+      deliveryDate: { $gte: tomorrow, $lt: dayAfter },
+      status: { $ne: 'delivered' },
+    }
+
+    // ✅ Unit filter for MD/CEO (if unit selected)
+    if (unitNo) filter.unitNo = unitNo
+
+    const bills = await StitchingBill.find(filter).sort({ deliveryDate: 1 })
+    res.json(bills)
+  } catch (err) {
+    console.error('❌ GET /stitching/reminders error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching (list + filter)
+// Unit-wise access control
+// ============================================================
+router.get('/', protect, async (req, res) => {
   try {
     const { unitNo, status, from, to, search } = req.query
+
+    // ✅ DEBUG — verify unit param received
+    console.log('🔍 GET /stitching — role:', req.user.role, '| userUnit:', req.user.unitNo, '| queryUnitNo:', unitNo)
+
     const filter = {}
 
-    if (unitNo) filter.unitNo = unitNo
+    // ✅ Unit access:
+    // - Admin → forced to own unit
+    // - MD/CEO/MD Finance → respect query param (strict)
+    if (req.user.role === 'admin') {
+      filter.unitNo = req.user.unitNo
+    } else if (unitNo && unitNo.trim()) {
+      filter.unitNo = unitNo.trim()
+    }
+
     if (status) filter.status = status
 
-    // Filter by CREATED date (full day range)
+    // Filter by CREATED date
     if (from || to) {
       filter.createdAt = {}
       if (from) {
@@ -149,6 +322,7 @@ router.get('/', async (req, res) => {
       filter.$or = [
         { customerName:   { $regex: search, $options: 'i' } },
         { customerMobile: { $regex: search, $options: 'i' } },
+        { customerNo:     { $regex: search, $options: 'i' } },
         { billNo:         { $regex: search, $options: 'i' } },
       ]
     }
@@ -162,36 +336,18 @@ router.get('/', async (req, res) => {
 })
 
 // ============================================================
-// GET /stitching/reminders (tomorrow's deliveries)
-// ============================================================
-router.get('/reminders', async (req, res) => {
-  try {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    tomorrow.setHours(0, 0, 0, 0)
-
-    const dayAfter = new Date(tomorrow)
-    dayAfter.setDate(dayAfter.getDate() + 1)
-
-    const bills = await StitchingBill.find({
-      deliveryDate: { $gte: tomorrow, $lt: dayAfter },
-      status: { $ne: 'delivered' },
-    }).sort({ deliveryDate: 1 })
-
-    res.json(bills)
-  } catch (err) {
-    console.error('❌ GET /stitching/reminders error:', err.message)
-    res.status(500).json({ message: err.message })
-  }
-})
-
-// ============================================================
 // GET /stitching/:id
 // ============================================================
-router.get('/:id', async (req, res) => {
+router.get('/:id', protect, async (req, res) => {
   try {
     const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Not found' })
+
+    // ✅ Admin can only see own unit bills
+    if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
+      return res.status(403).json({ message: 'Access denied — other unit bill' })
+    }
+
     res.json(bill)
   } catch (err) {
     console.error('❌ GET /stitching/:id error:', err.message)
@@ -202,9 +358,14 @@ router.get('/:id', async (req, res) => {
 // ============================================================
 // POST /stitching (create)
 // ============================================================
-router.post('/', uploadSinglePhoto, async (req, res) => {
+router.post('/', protect, uploadPhotos, async (req, res) => {
   try {
     const data = { ...req.body }
+
+    // ✅ Admin → force own unit
+    if (req.user.role === 'admin') {
+      data.unitNo = req.user.unitNo
+    }
 
     // Parse measurements
     if (typeof data.measurements === 'string') {
@@ -215,21 +376,60 @@ router.post('/', uploadSinglePhoto, async (req, res) => {
       }
     }
 
-    // Generate bill no
-    data.billNo = await generateBillNo(data.unitNo)
-
-    // Photo URL from Cloudinary
-    if (req.file) {
-      data.orderPhoto = req.file.path
+    // Parse paymentReference
+    if (typeof data.paymentReference === 'string') {
+      try {
+        data.paymentReference = JSON.parse(data.paymentReference)
+      } catch (e) {
+        data.paymentReference = { cashDenominations: [], gpayReference: '' }
+      }
     }
 
-    // Amount calculations
+    // ============ Customer No handling ============
+    let customerNo = data.customerNo?.trim()
+
+    // Auto-generate if not provided
+    if (!customerNo) {
+      customerNo = await generateCustomerNo(data.unitNo)
+    }
+    data.customerNo = customerNo
+
+    // ============ Loyalty points ============
+    // 1 bill = 5 points → new bill adds 5
+    const previousPoints = await getLoyaltyPoints(customerNo)
+    data.loyaltyPoints = previousPoints + 5
+
+    // ============ Generate bill no ============
+    data.billNo = await generateBillNo(data.unitNo)
+
+    // ============ Photos ============
+    if (req.orderPhotoUrl) {
+      data.orderPhoto = req.orderPhotoUrl
+      data.orderPhotoId = req.orderPhotoId
+    }
+    if (req.referencePhotoUrl) {
+      data.referencePhoto = req.referencePhotoUrl
+      data.referencePhotoId = req.referencePhotoId
+    }
+
+    // ============ Amount calculations ============
     data.amount  = Number(data.amount || 0)
     data.total   = Number(data.total || data.amount || 0)
     data.advance = Number(data.advance || 0)
     data.balance = data.total - data.advance
 
+    // ============ Advance validation ============
+    // Unit 2 → advance mandatory (must be > 0)
+    if (data.unitNo === '002' && data.advance <= 0) {
+      return res.status(400).json({
+        message: 'Advance amount is mandatory for Unit 002',
+      })
+    }
+
+
     const bill = await StitchingBill.create(data)
+
+    // ✅ Return with loyalty points included
     res.status(201).json(bill)
   } catch (err) {
     console.error('❌ POST /stitching error:', err.message)
@@ -240,15 +440,28 @@ router.post('/', uploadSinglePhoto, async (req, res) => {
 // ============================================================
 // PUT /stitching/:id (update)
 // ============================================================
-router.put('/:id', uploadSinglePhoto, async (req, res) => {
+router.put('/:id', protect, uploadPhotos, async (req, res) => {
   try {
     const data = { ...req.body }
 
-    // Remove immutable/meta fields
+    // ✅ Admin → only own unit bills
+    if (req.user.role === 'admin') {
+      const existing = await StitchingBill.findById(req.params.id)
+      if (!existing) return res.status(404).json({ message: 'Bill not found' })
+      if (existing.unitNo !== req.user.unitNo) {
+        return res.status(403).json({ message: 'Access denied — other unit bill' })
+      }
+      data.unitNo = req.user.unitNo   // Force own unit
+    }
+
+    // Remove immutable fields
     delete data._id
     delete data.createdAt
     delete data.updatedAt
     delete data.__v
+    delete data.billNo
+    delete data.customerNo
+    delete data.loyaltyPoints
 
     // Parse measurements (safe)
     if (typeof data.measurements === 'string') {
@@ -259,7 +472,16 @@ router.put('/:id', uploadSinglePhoto, async (req, res) => {
       }
     }
 
-    // Convert empty string numeric fields to Numbers
+    // Parse paymentReference
+    if (typeof data.paymentReference === 'string') {
+      try {
+        data.paymentReference = JSON.parse(data.paymentReference)
+      } catch (e) {
+        delete data.paymentReference
+      }
+    }
+
+    // Convert numeric fields
     if (data.amount !== undefined && data.amount !== '') {
       data.amount = Number(data.amount)
     }
@@ -276,9 +498,34 @@ router.put('/:id', uploadSinglePhoto, async (req, res) => {
       data.balance = Number(totalVal || 0) - Number(data.advance || 0)
     }
 
-    // Attach uploaded photo URL if present
-    if (req.file) {
-      data.orderPhoto = req.file.path
+    // ============ Advance validation ============
+    const existing = await StitchingBill.findById(req.params.id)
+    const checkUnit = data.unitNo || existing?.unitNo
+    const checkAdvance = data.advance !== undefined ? data.advance : existing?.advance
+
+    if (checkUnit === '002' && checkAdvance <= 0) {
+      return res.status(400).json({
+        message: 'Advance amount is mandatory for Unit 002',
+      })
+    }
+
+    // ============ Photos — destroy old if replaced ============
+    if (req.orderPhotoUrl) {
+      // Destroy old order photo
+      if (existing?.orderPhotoId) {
+        await deleteFromCloudinary(existing.orderPhotoId)
+      }
+      data.orderPhoto = req.orderPhotoUrl
+      data.orderPhotoId = req.orderPhotoId
+    }
+
+    if (req.referencePhotoUrl) {
+      // Destroy old reference photo
+      if (existing?.referencePhotoId) {
+        await deleteFromCloudinary(existing.referencePhotoId)
+      }
+      data.referencePhoto = req.referencePhotoUrl
+      data.referencePhotoId = req.referencePhotoId
     }
 
     const bill = await StitchingBill.findByIdAndUpdate(
@@ -287,10 +534,7 @@ router.put('/:id', uploadSinglePhoto, async (req, res) => {
       { returnDocument: 'after', runValidators: true }
     )
 
-    if (!bill) {
-      return res.status(404).json({ message: 'Bill not found' })
-    }
-
+    if (!bill) return res.status(404).json({ message: 'Bill not found' })
     res.json(bill)
   } catch (err) {
     console.error('❌ PUT /stitching error:', err.message)
@@ -301,14 +545,19 @@ router.put('/:id', uploadSinglePhoto, async (req, res) => {
 // ============================================================
 // PATCH /stitching/:id/status
 // ============================================================
-router.patch('/:id/status', async (req, res) => {
+router.patch('/:id/status', protect, async (req, res) => {
   try {
-    const bill = await StitchingBill.findByIdAndUpdate(
-      req.params.id,
-      { status: req.body.status },
-      { returnDocument: 'after' }
-    )
+    const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Bill not found' })
+
+    // ✅ Admin → only own unit bills
+    if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
+      return res.status(403).json({ message: 'Access denied — other unit bill' })
+    }
+
+    bill.status = req.body.status
+    await bill.save()
+
     res.json(bill)
   } catch (err) {
     console.error('❌ PATCH /stitching/:id/status error:', err.message)
@@ -319,10 +568,21 @@ router.patch('/:id/status', async (req, res) => {
 // ============================================================
 // DELETE /stitching/:id
 // ============================================================
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', protect, async (req, res) => {
   try {
-    const bill = await StitchingBill.findByIdAndDelete(req.params.id)
+    const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Bill not found' })
+
+    // ✅ Admin → only own unit bills
+    if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
+      return res.status(403).json({ message: 'Access denied — other unit bill' })
+    }
+
+    // ✅ Destroy images from Cloudinary
+    if (bill.orderPhotoId)     await deleteFromCloudinary(bill.orderPhotoId)
+    if (bill.referencePhotoId) await deleteFromCloudinary(bill.referencePhotoId)
+
+    await StitchingBill.findByIdAndDelete(req.params.id)
     res.json({ message: 'Deleted' })
   } catch (err) {
     console.error('❌ DELETE /stitching error:', err.message)
