@@ -10,6 +10,8 @@ dotenv.config()
 const { default: authRoutes }     = await import('./routes/authRoutes.js')
 const { default: stitchingRoutes } = await import('./routes/stitchingRoutes.js')
 const { default: staffRoutes }    = await import('./routes/staffRoutes.js')
+const { default: garmentRoutes } = await import('./routes/garmentRoutes.js')
+
 
 const app = express()
 
@@ -49,6 +51,8 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 app.use('/staff',     staffRoutes)
 app.use('/auth',      authRoutes)
 app.use('/stitching', stitchingRoutes)
+app.use('/garment', garmentRoutes)   // ✅ ADD
+
 
 // Health check
 app.get('/', (req, res) => {
