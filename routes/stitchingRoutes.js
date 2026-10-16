@@ -336,6 +336,146 @@ router.get('/', protect, async (req, res) => {
 })
 
 // ============================================================
+// GET /stitching/reports
+// Query: ?from=&to=
+// Role: MD/CEO/MD_Finance only
+// ============================================================
+router.get('/reports', protect, async (req, res) => {
+  try {
+    // ✅ Admin blocked
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ message: 'Reports not available for admin' })
+    }
+
+    const { from, to } = req.query
+
+    const matchStage = {}
+
+    if (from || to) {
+      matchStage.createdAt = {}
+      if (from) {
+        const start = new Date(from)
+        start.setHours(0, 0, 0, 0)
+        matchStage.createdAt.$gte = start
+      }
+      if (to) {
+        const end = new Date(to)
+        end.setHours(23, 59, 59, 999)
+        matchStage.createdAt.$lte = end
+      }
+    }
+
+    // ✅ Summary aggregates
+    const summaryAgg = await StitchingBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: null,
+          totalBills:   { $sum: 1 },
+          totalAmount:  { $sum: '$amount' },
+          totalAdvance: { $sum: '$advance' },
+          totalBalance: { $sum: '$balance' },
+        },
+      },
+    ])
+
+    const summary = summaryAgg[0] || {
+      totalBills: 0,
+      totalAmount: 0,
+      totalAdvance: 0,
+      totalBalance: 0,
+    }
+
+    // ✅ Status breakdown
+    const statusAgg = await StitchingBill.aggregate([
+      { $match: matchStage },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ])
+
+    const statusBreakdown = statusAgg.map((s) => ({
+      status: s._id,
+      count: s.count,
+    }))
+
+    // ✅ Unit-wise breakdown
+    const unitAgg = await StitchingBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$unitNo',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ])
+
+    const unitBreakdown = unitAgg.map((u) => ({
+      unitNo: u._id,
+      count: u.count,
+      totalAmount: u.totalAmount,
+    }))
+
+    // ✅ Top customers (by bill count)
+    const customerAgg = await StitchingBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$customerNo',
+          customerName: { $first: '$customerName' },
+          customerMobile: { $first: '$customerMobile' },
+          billCount: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+        },
+      },
+      { $sort: { billCount: -1 } },
+      { $limit: 10 },
+    ])
+
+    const topCustomers = customerAgg.map((c) => ({
+      customerNo: c._id,
+      customerName: c.customerName,
+      customerMobile: c.customerMobile,
+      billCount: c.billCount,
+      totalAmount: c.totalAmount,
+    }))
+
+    // ✅ Daily trend (last 30 days by default within range)
+    const trendMatch = { ...matchStage }
+    const trendAgg = await StitchingBill.aggregate([
+      { $match: trendMatch },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+          },
+          count: { $sum: 1 },
+          amount: { $sum: '$amount' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ])
+
+    const dailyTrend = trendAgg.map((d) => ({
+      date: d._id,
+      count: d.count,
+      amount: d.amount,
+    }))
+
+    res.json({
+      summary,
+      statusBreakdown,
+      unitBreakdown,
+      topCustomers,
+      dailyTrend,
+    })
+  } catch (err) {
+    console.error('❌ GET /stitching/reports error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
 // GET /stitching/:id
 // ============================================================
 router.get('/:id', protect, async (req, res) => {

@@ -351,6 +351,190 @@ router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res)
 })
 
 // ============================================================
+// GET /garment/reports
+// Query: ?from=&to=
+// Role: MD/CEO/MD_Finance only
+// ============================================================
+router.get('/reports', protect, async (req, res) => {
+  try {
+    // ✅ Admin blocked
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ message: 'Reports not available for admin' })
+    }
+
+    const { from, to } = req.query
+
+    const matchStage = {}
+    if (from || to) {
+      matchStage.createdAt = {}
+      if (from) {
+        const start = new Date(from)
+        start.setHours(0, 0, 0, 0)
+        matchStage.createdAt.$gte = start
+      }
+      if (to) {
+        const end = new Date(to)
+        end.setHours(23, 59, 59, 999)
+        matchStage.createdAt.$lte = end
+      }
+    }
+
+    // ✅ Summary
+    const summaryAgg = await GarmentBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: null,
+          totalBills:   { $sum: 1 },
+          totalRevenue: { $sum: '$totalAmount' },
+          totalItems:   { $sum: '$totalItems' },
+        },
+      },
+    ])
+
+    const summary = summaryAgg[0] || {
+      totalBills: 0,
+      totalRevenue: 0,
+      totalItems: 0,
+    }
+
+    // ============ PROFIT CALCULATION ============
+    // For each bill, sum up (item.rate - purchasePrice) per item
+    // Need to join with GarmentStock to get purchasePrice
+    const bills = await GarmentBill.find(matchStage).lean()
+
+    // Fetch all relevant stock in one go
+    const productCodes = [...new Set(
+      bills.flatMap((b) => (b.items || []).map((it) => it.productCode))
+    )]
+
+    const stocks = await GarmentStock.find({
+      productCode: { $in: productCodes },
+    }).lean()
+
+    // Build lookup map: { productCode: { itemNo: purchasePrice } }
+    const purchaseLookup = {}
+    stocks.forEach((s) => {
+      purchaseLookup[s.productCode] = {}
+      ;(s.variants || []).forEach((v) => {
+        purchaseLookup[s.productCode][v.itemNo] = v.purchasePrice || 0
+      })
+    })
+
+    // Compute profit
+    let totalProfit = 0
+    const productStats = {} // { productCode: { qty, revenue, profit, description } }
+
+    bills.forEach((bill) => {
+      ;(bill.items || []).forEach((it) => {
+        const purchase = purchaseLookup[it.productCode]?.[it.itemNo] || 0
+        const revenue = Number(it.amount || 0)
+        const profit = revenue - purchase
+
+        totalProfit += profit
+
+        if (!productStats[it.productCode]) {
+          productStats[it.productCode] = {
+            productCode: it.productCode,
+            description: it.description || '',
+            qty: 0,
+            revenue: 0,
+            profit: 0,
+          }
+        }
+        productStats[it.productCode].qty += 1
+        productStats[it.productCode].revenue += revenue
+        productStats[it.productCode].profit += profit
+      })
+    })
+
+    const profitMargin = summary.totalRevenue > 0
+      ? ((totalProfit / summary.totalRevenue) * 100).toFixed(1)
+      : 0
+
+    // ✅ Top selling products
+    const topProducts = Object.values(productStats)
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, 10)
+
+    // ✅ Payment mode breakdown
+    const paymentAgg = await GarmentBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$paymentMode',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$totalAmount' },
+        },
+      },
+    ])
+    const paymentBreakdown = paymentAgg.map((p) => ({
+      mode: p._id,
+      count: p.count,
+      totalAmount: p.totalAmount,
+    }))
+
+    // ✅ Top customers
+    const customerAgg = await GarmentBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$customerNo',
+          customerName: { $first: '$customerName' },
+          customerMobile: { $first: '$customerMobile' },
+          billCount: { $sum: 1 },
+          totalAmount: { $sum: '$totalAmount' },
+        },
+      },
+      { $sort: { billCount: -1 } },
+      { $limit: 10 },
+    ])
+    const topCustomers = customerAgg.map((c) => ({
+      customerNo: c._id,
+      customerName: c.customerName,
+      customerMobile: c.customerMobile,
+      billCount: c.billCount,
+      totalAmount: c.totalAmount,
+    }))
+
+    // ✅ Daily trend
+    const trendAgg = await GarmentBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+          },
+          count: { $sum: 1 },
+          revenue: { $sum: '$totalAmount' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ])
+    const dailyTrend = trendAgg.map((d) => ({
+      date: d._id,
+      count: d.count,
+      revenue: d.revenue,
+    }))
+
+    res.json({
+      summary: {
+        ...summary,
+        totalProfit,
+        profitMargin,
+      },
+      topProducts,
+      paymentBreakdown,
+      topCustomers,
+      dailyTrend,
+    })
+  } catch (err) {
+    console.error('❌ GET /garment/reports error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
 // BILLS — DELETE (restore stock)
 // ============================================================
 router.delete('/bills/:id', protect, async (req, res) => {
@@ -637,6 +821,8 @@ router.put('/stock/:id', protect, async (req, res) => {
     res.status(500).json({ message: err.message })
   }
 })
+
+
 
 // ============================================================
 // STOCK — DELETE
