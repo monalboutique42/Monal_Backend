@@ -672,13 +672,16 @@ router.post('/stock', protect, async (req, res) => {
             return res.status(400).json({ message: 'Selling price cannot be less than purchase price' })
           }
 
-          // Always auto-assign new itemNo (ignore user's itemNo)
-          v.itemNo = padCode(nextNum)
-          nextNum += 1
+// Always auto-assign new itemNo (ignore user's itemNo)
+v.itemNo = padCode(nextNum)
+nextNum += 1
 
-          v.purchasePrice = Number(v.purchasePrice)
-          v.sellingPrice  = Number(v.sellingPrice)
-          v.status = v.status || 'instock'
+v.description = v.description?.trim() || ''
+v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
+v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
+v.purchasePrice = Number(v.purchasePrice)
+v.sellingPrice  = Number(v.sellingPrice)
+v.status = v.status || 'instock'
         }
 
         existing.variants.push(...data.variants)
@@ -743,11 +746,14 @@ router.post('/stock', protect, async (req, res) => {
       if (Number(v.sellingPrice) < Number(v.purchasePrice)) {
         return res.status(400).json({ message: 'Selling price cannot be less than purchase price' })
       }
-      v.itemNo = padCode(nextItemNum)
-      nextItemNum += 1
-      v.purchasePrice = Number(v.purchasePrice)
-      v.sellingPrice  = Number(v.sellingPrice)
-      v.status = v.status || 'instock'
+v.itemNo = padCode(nextItemNum)
+nextItemNum += 1
+v.description = v.description?.trim() || ''
+v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
+v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
+v.purchasePrice = Number(v.purchasePrice)
+v.sellingPrice  = Number(v.sellingPrice)
+v.status = v.status || 'instock'
     }
 
     await GarmentCounter.findByIdAndUpdate(
@@ -813,20 +819,23 @@ router.put('/stock/:id', protect, async (req, res) => {
 
       let nextNum = maxNum + 1
 
-      for (const v of data.variants) {
-        // If variant has existing itemNo → keep it
-        // If no itemNo → assign new
-        if (!v.itemNo?.trim()) {
-          v.itemNo = padCode(nextNum)
-          nextNum += 1
-        } else {
-          const n = parseInt(v.itemNo, 10)
-          if (!isNaN(n) && n >= nextNum) nextNum = n + 1
-        }
-        v.purchasePrice = Number(v.purchasePrice || 0)
-        v.sellingPrice  = Number(v.sellingPrice || 0)
-        v.status = v.status || 'instock'
-      }
+for (const v of data.variants) {
+  // If variant has existing itemNo → keep it
+  // If no itemNo → assign new
+  if (!v.itemNo?.trim()) {
+    v.itemNo = padCode(nextNum)
+    nextNum += 1
+  } else {
+    const n = parseInt(v.itemNo, 10)
+    if (!isNaN(n) && n >= nextNum) nextNum = n + 1
+  }
+  v.description = v.description?.trim() || ''
+  v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
+  v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
+  v.purchasePrice = Number(v.purchasePrice || 0)
+  v.sellingPrice  = Number(v.sellingPrice || 0)
+  v.status = v.status || 'instock'
+}
 
       if (nextNum > 1) {
         await GarmentCounter.findByIdAndUpdate(

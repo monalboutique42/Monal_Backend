@@ -90,8 +90,17 @@ const garmentStockVariantSchema = new mongoose.Schema(
     itemNo: { type: String, required: true },       // 01, 02, ..., 99, 100
     colour: { type: String, required: true },
     size:   { type: String, required: true },
+
+    // ✅ NEW — optional description for the variant
+    description: { type: String, default: '' },
+
+    // ✅ NEW — purchase year & month
+    purchaseYear:  { type: Number, default: null, min: 2000, max: 2100 },
+    purchaseMonth: { type: Number, default: null, min: 1, max: 12 },
+
     purchasePrice: { type: Number, required: true, min: 0 },
-    sellingPrice:  { type: Number, required: true, min: 0 },    status: {
+    sellingPrice:  { type: Number, required: true, min: 0 },
+    status: {
       type: String,
       enum: ['instock', 'sold', 'return', 'exchange'],
       default: 'instock',
