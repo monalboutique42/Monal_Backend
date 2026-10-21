@@ -58,24 +58,44 @@ async function generateGarmentBillNo(firstItemCode) {
 // ============================================================
 router.get('/next-customer-no', protect, async (req, res) => {
   try {
-    // ✅ Find highest numeric customerNo from bills
     const bills = await GarmentBill.find().select('customerNo').lean()
 
-    let maxNum = 0
+    let maxG = 0
+    let maxGR = 0
+
     bills.forEach((b) => {
-      const cno = b.customerNo || ''
-      const match = cno.match(/^G(\d+)$/i)
-      if (match) {
-        const n = parseInt(match[1], 10)
-        if (!isNaN(n) && n > maxNum) maxNum = n
+      const cno = (b.customerNo || '').trim().toUpperCase()
+
+      // ✅ Check GR first (longer prefix)
+      let m = cno.match(/^GR(\d+)$/)
+      if (m) {
+        const n = parseInt(m[1], 10)
+        if (!isNaN(n) && n > maxGR) maxGR = n
+        return
+      }
+
+      // ✅ Then plain G
+      m = cno.match(/^G(\d+)$/)
+      if (m) {
+        const n = parseInt(m[1], 10)
+        if (!isNaN(n) && n > maxG) maxG = n
       }
     })
 
-    // Next = maxNum + 1, or 1 if no customers
-    const nextNum = maxNum + 1
-    const customerNo = `G${String(nextNum).padStart(2, '0')}`
+    const nextG  = maxG + 1
+    const nextGR = maxGR + 1
 
-    res.json({ customerNo, nextNum })
+    res.json({
+      // Default = G series
+      customerNo: `G${String(nextG).padStart(2, '0')}`,
+      nextNum: nextG,
+
+      // Both suggestions for the dropdown
+      suggestions: [
+        { series: 'G',  customerNo: `G${String(nextG).padStart(2, '0')}`,  nextNum: nextG  },
+        { series: 'GR', customerNo: `GR${String(nextGR).padStart(2, '0')}`, nextNum: nextGR },
+      ],
+    })
   } catch (err) {
     console.error('❌ next-customer-no error:', err.message)
     res.status(500).json({ message: err.message })
@@ -170,11 +190,19 @@ router.get('/customer/:customerNo', protect, async (req, res) => {
 // ============================================================
 router.get('/bills', protect, async (req, res) => {
   try {
-    const { productCode, paymentMode, from, to, search } = req.query
-    const filter = {}
+const { productCode, paymentMode, from, to, search, customerSeries } = req.query
+const filter = {}
 
-    if (paymentMode) filter.paymentMode = paymentMode
-    if (productCode) filter['items.productCode'] = productCode
+if (paymentMode) filter.paymentMode = paymentMode
+if (productCode) filter['items.productCode'] = productCode
+
+// ✅ Customer series filter: 'G' or 'GR'
+if (customerSeries === 'GR') {
+  filter.customerNo = { $regex: '^GR\\d+$', $options: 'i' }
+} else if (customerSeries === 'G') {
+  // G followed by digits, but NOT GR
+  filter.customerNo = { $regex: '^G\\d+$', $options: 'i' }
+}
 
     if (from || to) {
       filter.createdAt = {}
