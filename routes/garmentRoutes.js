@@ -50,7 +50,10 @@ async function generateGarmentBillNo(firstItemCode) {
     const lastSeq = parseInt(lastBill.billNo.slice(prefix.length), 10)
     if (!isNaN(lastSeq)) nextSeq = lastSeq + 1
   }
-  return `${prefix}${String(nextSeq).padStart(3, '0')}`
+
+  // ✅ 2-digit until 99, then natural (3+ digits)
+  const seqStr = nextSeq <= 99 ? String(nextSeq).padStart(2, '0') : String(nextSeq)
+  return `${prefix}${seqStr}`
 }
 
 // ============================================================
@@ -108,12 +111,53 @@ router.get('/next-customer-no', protect, async (req, res) => {
 router.get('/next-product-code', protect, async (req, res) => {
   try {
     const stocks = await GarmentStock.find().select('productCode').lean()
-    const codes = stocks.map((s) => parseInt(s.productCode, 10)).filter((n) => !isNaN(n))
-    const maxFromStock = codes.length ? Math.max(...codes) : 0
-    const counter = await GarmentCounter.findById('product_code')
-    const maxFromCounter = counter?.seq || 0
-    const nextNum = Math.max(maxFromStock, maxFromCounter) + 1
-    res.json({ productCode: padCode(nextNum), nextNum })
+
+    // ✅ Track max per series
+    const maxBySeries = { S: 0, M: 0, T: 0 }
+    let maxNumeric = 0
+
+    stocks.forEach((s) => {
+      const code = (s.productCode || '').trim().toUpperCase()
+
+      // Numeric legacy (01, 02...) — only used to know we shouldn't suggest these
+      const numMatch = code.match(/^(\d+)$/)
+      if (numMatch) {
+        const n = parseInt(numMatch[1], 10)
+        if (!isNaN(n) && n > maxNumeric) maxNumeric = n
+        return
+      }
+
+      // S / M / T prefixes
+      const seriesMatch = code.match(/^([SMT])(\d+)$/)
+      if (seriesMatch) {
+        const letter = seriesMatch[1]
+        const n = parseInt(seriesMatch[2], 10)
+        if (!isNaN(n) && n > maxBySeries[letter]) maxBySeries[letter] = n
+      }
+    })
+
+    // Also respect counters if they exist (in case legacy counter was used)
+    for (const letter of ['S', 'M', 'T']) {
+      const counter = await GarmentCounter.findById(`product_code_${letter}`)
+      if (counter?.seq && counter.seq > maxBySeries[letter]) {
+        maxBySeries[letter] = counter.seq
+      }
+    }
+
+    const nextS = maxBySeries.S + 1
+    const nextM = maxBySeries.M + 1
+    const nextT = maxBySeries.T + 1
+
+    res.json({
+      // Default = S series
+      productCode: `S${padCode(nextS)}`,
+      nextNum: nextS,
+      suggestions: [
+        { series: 'S', productCode: `S${padCode(nextS)}`, nextNum: nextS },
+        { series: 'M', productCode: `M${padCode(nextM)}`, nextNum: nextM },
+        { series: 'T', productCode: `T${padCode(nextT)}`, nextNum: nextT },
+      ],
+    })
   } catch (err) {
     res.status(500).json({ message: err.message })
   }
@@ -127,9 +171,11 @@ router.get('/next-item-no', protect, async (req, res) => {
     const { productCode } = req.query
     if (!productCode) return res.status(400).json({ message: 'productCode required' })
 
-    const stock = await GarmentStock.findOne({ productCode }).lean()
+    const cleanCode = String(productCode).trim().toUpperCase()
+    const stock = await GarmentStock.findOne({ productCode: cleanCode }).lean()
     const existing = stock?.variants?.length || 0
-    const counter = await GarmentCounter.findById(`item_no_${productCode}`)
+
+    const counter = await GarmentCounter.findById(`item_no_${cleanCode}`)
     const maxFromCounter = counter?.seq || 0
     const nextNum = Math.max(existing, maxFromCounter) + 1
 
@@ -703,34 +749,59 @@ v.status = v.status || 'instock'
     }
 
     // ---------- New product ----------
-    if (!data.productCode?.trim()) {
-      // Auto-generate
-      const stocks = await GarmentStock.find().select('productCode').lean()
-      const codes = stocks.map((s) => parseInt(s.productCode, 10)).filter((n) => !isNaN(n))
-      const maxFromStock = codes.length ? Math.max(...codes) : 0
+if (!data.productCode?.trim()) {
+  // ✅ Auto-generate as S-series (default)
+  const stocks = await GarmentStock.find().select('productCode').lean()
 
-      const counter = await GarmentCounter.findById('product_code')
-      const maxFromCounter = counter?.seq || 0
+  let maxS = 0
+  stocks.forEach((s) => {
+    const code = (s.productCode || '').trim().toUpperCase()
+    const m = code.match(/^S(\d+)$/)
+    if (m) {
+      const n = parseInt(m[1], 10)
+      if (!isNaN(n) && n > maxS) maxS = n
+    }
+  })
 
-      const nextNum = Math.max(maxFromStock, maxFromCounter) + 1
-      data.productCode = padCode(nextNum)
+  const counterS = await GarmentCounter.findById('product_code_S')
+  const maxFromCounterS = counterS?.seq || 0
 
+  const nextNum = Math.max(maxS, maxFromCounterS) + 1
+  data.productCode = `S${padCode(nextNum)}`
+
+  await GarmentCounter.findByIdAndUpdate(
+    'product_code_S',
+    { $max: { seq: nextNum } },
+    { upsert: true, setDefaultsOnInsert: true }
+  )
+} else {
+  // ✅ User provided a code (S01 / M05 / T12 / 01 / …)
+  data.productCode = data.productCode.trim().toUpperCase()
+
+  // If it's S/M/T + number → bump that series counter
+  const seriesMatch = data.productCode.match(/^([SMT])(\d+)$/)
+  if (seriesMatch) {
+    const letter = seriesMatch[1]
+    const n = parseInt(seriesMatch[2], 10)
+    if (!isNaN(n)) {
       await GarmentCounter.findByIdAndUpdate(
-        'product_code',
-        { $max: { seq: nextNum } },
+        `product_code_${letter}`,
+        { $max: { seq: n } },
         { upsert: true, setDefaultsOnInsert: true }
       )
-    } else {
-      data.productCode = data.productCode.trim()
-      const numPC = parseInt(data.productCode, 10)
-      if (!isNaN(numPC)) {
-        await GarmentCounter.findByIdAndUpdate(
-          'product_code',
-          { $max: { seq: numPC } },
-          { upsert: true, setDefaultsOnInsert: true }
-        )
-      }
     }
+  } else {
+    // Legacy numeric — keep numeric counter bumped for safety
+    const numPC = parseInt(data.productCode, 10)
+    if (!isNaN(numPC)) {
+      await GarmentCounter.findByIdAndUpdate(
+        'product_code',
+        { $max: { seq: numPC } },
+        { upsert: true, setDefaultsOnInsert: true }
+      )
+    }
+  }
+}
 
     // Validate + auto itemNo
     let nextItemNum = 1
