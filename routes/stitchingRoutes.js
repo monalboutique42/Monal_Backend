@@ -162,14 +162,6 @@ async function findCustomerByNo(customerNo) {
   return bill
 }
 
-// ============================================================
-// HELPER: Calculate total loyalty points for a customer
-// ============================================================
-async function getLoyaltyPoints(customerNo) {
-  if (!customerNo) return 0
-  const bills = await StitchingBill.find({ customerNo: customerNo.trim() })
-  return bills.length * 5   // 1 bill = 5 points
-}
 
 // ============================================================
 // GET /stitching/next-bill-no
@@ -198,18 +190,13 @@ router.get('/customer/:customerNo', protect, async (req, res) => {
     }
 
     const lastBill = await findCustomerByNo(customerNo)
-    const loyaltyPoints = await getLoyaltyPoints(customerNo)
 
     if (!lastBill) {
-      return res.json({
-        found: false,
-        loyaltyPoints: 0,
-      })
+      return res.json({ found: false })
     }
 
     res.json({
       found: true,
-      loyaltyPoints,
       customer: {
         customerNo:     lastBill.customerNo,
         customerName:   lastBill.customerName,
@@ -534,13 +521,21 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
     }
     data.customerNo = customerNo
 
-    // ============ Loyalty points ============
-    // 1 bill = 5 points → new bill adds 5
-    const previousPoints = await getLoyaltyPoints(customerNo)
-    data.loyaltyPoints = previousPoints + 5
-
     // ============ Generate bill no ============
     data.billNo = await generateBillNo(data.unitNo)
+
+    // ✅ Discount & Shipping Calculation
+    data.amount = Number(data.amount || 0)
+    data.shippingAmount = Number(data.shippingAmount || 0)
+    
+    // Discount logic based on amount
+    let discountPercent = 0
+    if (data.amount >= 10000) discountPercent = 0 // Free Embroidery
+    else if (data.amount >= 5000) discountPercent = 5
+    else if (data.amount >= 2500) discountPercent = 2.5
+    
+    data.discountPercent = discountPercent
+    data.discountAmount = (data.amount * discountPercent) / 100
 
     // ============ Photos ============
     if (req.orderPhotoUrl) {
@@ -553,8 +548,7 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
     }
 
     // ============ Amount calculations ============
-    data.amount  = Number(data.amount || 0)
-    data.total   = Number(data.total || data.amount || 0)
+    data.total   = data.amount + data.shippingAmount - data.discountAmount
     data.advance = Number(data.advance || 0)
     data.balance = data.total - data.advance
 
@@ -632,10 +626,22 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
       data.advance = data.advance === '' ? 0 : Number(data.advance)
     }
 
-    // Recalculate balance
-    const totalVal = data.total !== undefined ? data.total : data.amount
-    if (totalVal !== undefined) {
-      data.balance = Number(totalVal || 0) - Number(data.advance || 0)
+    // ✅ Recalculate Discount & Total
+    const amtVal = data.amount !== undefined ? Number(data.amount) : (existing?.amount || 0)
+    const shipVal = data.shippingAmount !== undefined ? Number(data.shippingAmount) : (existing?.shippingAmount || 0)
+
+    let discountPercent = 0
+    if (amtVal >= 10000) discountPercent = 0 // Free Embroidery
+    else if (amtVal >= 5000) discountPercent = 5
+    else if (amtVal >= 2500) discountPercent = 2.5
+
+    data.discountPercent = discountPercent
+    data.discountAmount = (amtVal * discountPercent) / 100
+    data.total = amtVal + shipVal - data.discountAmount
+
+    if (data.advance !== undefined || existing) {
+      const advVal = data.advance !== undefined ? data.advance : (existing?.advance || 0)
+      data.balance = data.total - Number(advVal || 0)
     }
 
     // ============ Advance validation ============

@@ -11,8 +11,10 @@ const stitchingBillSchema = new mongoose.Schema(
     customerName:   { type: String, required: true, trim: true },
     customerMobile: { type: String, required: true, match: /^[0-9]{10}$/ },
 
-    // ============ Loyalty ============
-    loyaltyPoints: { type: Number, default: 0 },   // ✅ NEW
+    // ============ Discount & Shipping ============
+    discountPercent: { type: Number, default: 0 },
+    discountAmount:  { type: Number, default: 0 },
+    shippingAmount:  { type: Number, default: 0 },
 
     // ============ Order ============
     orderPhoto:   { type: String, default: null },     // Cloudinary URL
