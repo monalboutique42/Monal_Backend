@@ -364,7 +364,7 @@ router.get('/:id/payments', protect, async (req, res) => {
 // ============================================================
 router.get('/', protect, async (req, res) => {
   try {
-    const { unitNo, status, from, to, search, deliveryDate } = req.query
+const { unitNo, status, from, to, search, deliveryDate, dueStatus } = req.query
 
     const filter = {}
 
@@ -405,6 +405,13 @@ router.get('/', protect, async (req, res) => {
         { customerNo:     { $regex: search, $options: 'i' } },
         { billNo:         { $regex: search, $options: 'i' } },
       ]
+    }
+
+        // ✅ Due Status filter — Pending (balance > 0) | Completed (balance === 0)
+    if (dueStatus === 'pending') {
+      filter.balance = { $gt: 0 }
+    } else if (dueStatus === 'completed') {
+      filter.balance = 0
     }
 
     const bills = await StitchingBill.find(filter).sort({ createdAt: -1 })
@@ -684,7 +691,7 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
     data.discountAmount = (amtVal * discountPercent) / 100
     data.total = amtVal + shipVal - data.discountAmount
 
-    // ✅ Payment logic — idempotent (same date overwrite)
+    // ✅ Payment logic — date-aware (same-day overwrite | next-day append)
     const paymentNow = data.payment !== undefined && data.payment !== ''
       ? Number(data.payment) : 0
     delete data.payment
@@ -693,41 +700,72 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
       const paymentDate = getTodayStr()
       const history = (existing.paymentHistory || []).slice()
 
-      // Sum of all previous payments EXCLUDING today's (being replaced)
-      // ✅ paymentNow = total paid so far (includes all previous)
-      if (paymentNow > data.total) {
-        return res.status(400).json({
-          message: `Payment ₹${paymentNow} exceeds bill total ₹${data.total}`,
-        })
-      }
-
-      // Find existing today's entry
+      // Check if there is already a today's entry (same-day edit)
       const idx = history.findIndex((p) => p.paymentDate === paymentDate)
       const existingEntry = idx !== -1 ? history[idx] : null
 
-      const newEntry = {
-        amountPaid: paymentNow,
-        paymentDate,
-        paymentMode: data.paymentMode || existing.paymentMode || 'cash',
-        paymentReference: data.paymentReference || existing.paymentReference || {
-          cashDenominations: [],
-          gpayReference: '',
-        },
-        billBy: data.billBy || existing.billBy || '',
-        recordedAt: new Date(),
-        // ✅ Increment edit count if entry existed
-        editCount: existingEntry ? (existingEntry.editCount || 1) + 1 : 1,
-      }
+      if (existingEntry) {
+        // ========================================================
+        // SAME DAY EDIT
+        // ========================================================
+        // paymentNow = total paid so far today (includes existing entry)
+        if (paymentNow > data.total) {
+          return res.status(400).json({
+            message: `Payment ₹${paymentNow} exceeds bill total ₹${data.total}`,
+          })
+        }
 
-      if (idx !== -1) {
+        const newEntry = {
+          amountPaid: paymentNow,
+          paymentDate,
+          paymentMode: data.paymentMode || existing.paymentMode || 'cash',
+          paymentReference: data.paymentReference || existing.paymentReference || {
+            cashDenominations: [],
+            gpayReference: '',
+          },
+          billBy: data.billBy || existing.billBy || '',
+          recordedAt: new Date(),
+          editCount: (existingEntry.editCount || 1) + 1,
+        }
+
         history[idx] = newEntry
+        data.paymentHistory = history
+        data.advance = paymentNow
+        data.balance = Math.max(0, data.total - data.advance)
       } else {
-        history.push(newEntry)
-      }
+        // ========================================================
+        // NEXT DAY (or later) EDIT — incremental
+        // ========================================================
+        // paymentNow = NEW payment for this day (fresh entry)
 
-      data.paymentHistory = history
-      data.advance = paymentNow
-      data.balance = Math.max(0, data.total - data.advance)
+        const currentBalance = existing.balance || 0
+
+        // Overpayment check
+        if (paymentNow > currentBalance) {
+          return res.status(400).json({
+            message: `Payment ₹${paymentNow} exceeds remaining balance ₹${currentBalance}`,
+          })
+        }
+
+        const newEntry = {
+          amountPaid: paymentNow,
+          paymentDate,
+          paymentMode: data.paymentMode || existing.paymentMode || 'cash',
+          paymentReference: data.paymentReference || existing.paymentReference || {
+            cashDenominations: [],
+            gpayReference: '',
+          },
+          billBy: data.billBy || existing.billBy || '',
+          recordedAt: new Date(),
+          editCount: 1,     // fresh day entry
+        }
+
+        history.push(newEntry)
+
+        data.paymentHistory = history
+        data.advance = (existing.advance || 0) + paymentNow
+        data.balance = Math.max(0, currentBalance - paymentNow)
+      }
     } else {
       // No new payment — recalc balance from existing advance
       data.advance = existing.advance || 0
