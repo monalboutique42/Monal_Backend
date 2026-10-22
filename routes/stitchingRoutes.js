@@ -16,44 +16,38 @@ cloudinary.config({
 })
 
 // ============================================================
-// MULTER — memory storage
+// MULTER
 // ============================================================
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 })
 
 // ============================================================
-// Helper: Upload buffer to Cloudinary (unsigned)
+// Cloudinary helpers
 // ============================================================
 const uploadToCloudinary = async (buffer) => {
   const base64 = buffer.toString('base64')
   const dataUri = `data:image/jpeg;base64,${base64}`
-
   const result = await cloudinary.uploader.unsigned_upload(
     dataUri,
     'monal_unsigned',
     { folder: 'monal-boutique' }
   )
-
   return result
 }
 
-// ============================================================
-// Helper: Delete Cloudinary image by public_id
-// ============================================================
 const deleteFromCloudinary = async (publicId) => {
   if (!publicId) return
   try {
     await cloudinary.uploader.destroy(publicId)
-    console.log('🗑️  Deleted from Cloudinary:', publicId)
   } catch (err) {
-    console.error('⚠️  Cloudinary delete failed:', err.message)
+    console.error('⚠️ Cloudinary delete failed:', err.message)
   }
 }
 
 // ============================================================
-// Middleware: Handle both order + reference photo uploads
+// Photo upload middleware
 // ============================================================
 const uploadPhotos = (req, res, next) => {
   const uploadFields = upload.fields([
@@ -63,34 +57,23 @@ const uploadPhotos = (req, res, next) => {
 
   uploadFields(req, res, async (err) => {
     if (err) {
-      console.error('❌ Multer error:', err.message)
       return res.status(500).json({ message: err.message || 'File upload failed' })
     }
-
     try {
-      // Upload order photo (mandatory if provided)
       if (req.files?.orderPhoto?.[0]) {
         const file = req.files.orderPhoto[0]
-        console.log('📤 Uploading order photo:', file.originalname, file.size, 'bytes')
         const result = await uploadToCloudinary(file.buffer)
         req.orderPhotoUrl = result.secure_url
         req.orderPhotoId  = result.public_id
-        console.log('✅ Order photo uploaded:', result.secure_url)
       }
-
-      // Upload reference photo (optional)
       if (req.files?.referencePhoto?.[0]) {
         const file = req.files.referencePhoto[0]
-        console.log('📤 Uploading reference photo:', file.originalname, file.size, 'bytes')
         const result = await uploadToCloudinary(file.buffer)
         req.referencePhotoUrl = result.secure_url
         req.referencePhotoId  = result.public_id
-        console.log('✅ Reference photo uploaded:', result.secure_url)
       }
-
       next()
     } catch (cloudErr) {
-      console.error('❌ Cloudinary upload FAIL:', cloudErr.message)
       return res.status(500).json({
         message: 'Cloudinary upload failed: ' + cloudErr.message,
       })
@@ -99,15 +82,13 @@ const uploadPhotos = (req, res, next) => {
 }
 
 // ============================================================
-// HELPER: Generate Stitching Bill No
-// Format: YYYY + MM + UnitNo(3) + BillNo(3)
+// HELPERS
 // ============================================================
 async function generateBillNo(unitNo) {
   const now = new Date()
   const year  = now.getFullYear().toString()
   const month = (now.getMonth() + 1).toString().padStart(2, '0')
   const unit  = (unitNo || '001').padStart(3, '0')
-
   const prefix = `${year}${month}${unit}`
 
   const lastBill = await StitchingBill
@@ -119,25 +100,16 @@ async function generateBillNo(unitNo) {
     const lastSeq = parseInt(lastBill.billNo.slice(prefix.length), 10)
     if (!isNaN(lastSeq)) nextSeq = lastSeq + 1
   }
-
-  const seq = nextSeq.toString().padStart(3, '0')
-  return `${prefix}${seq}`
+  return `${prefix}${nextSeq.toString().padStart(3, '0')}`
 }
 
-// ============================================================
-// HELPER: Generate Customer No
-// Format: <unitNo> + <seq>    Example: 101, 199, 1100
-// ============================================================
 async function generateCustomerNo(unitNo) {
-  const unit = (unitNo || '1').replace(/^0+/, '')   // "001" → "1"
-
-  // Find all customer numbers starting with this unit
+  const unit = (unitNo || '1').replace(/^0+/, '')
   const prefix = unit
   const bills = await StitchingBill
     .find({ customerNo: { $regex: `^${prefix}` } })
     .select('customerNo')
 
-  // Extract sequence numbers
   let maxSeq = 0
   bills.forEach((b) => {
     const seqStr = b.customerNo.slice(prefix.length)
@@ -146,22 +118,26 @@ async function generateCustomerNo(unitNo) {
   })
 
   const nextSeq = maxSeq + 1
-  const seqStr = nextSeq.toString().padStart(2, '0')   // "01", "99", "100"
-
-  return `${unit}${seqStr}`   // "101", "199", "1100"
+  return `${unit}${nextSeq.toString().padStart(2, '0')}`
 }
 
-// ============================================================
-// HELPER: Find most recent bill by customerNo
-// ============================================================
 async function findCustomerByNo(customerNo) {
   if (!customerNo) return null
-  const bill = await StitchingBill
+  return await StitchingBill
     .findOne({ customerNo: customerNo.trim() })
     .sort({ createdAt: -1 })
-  return bill
 }
 
+// ============================================================
+// Get today's date string (YYYY-MM-DD)
+// ============================================================
+function getTodayStr() {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
 
 // ============================================================
 // GET /stitching/next-bill-no
@@ -173,27 +149,20 @@ router.get('/next-bill-no', protect, async (req, res) => {
     const billNo = await generateBillNo(unitNo)
     res.json({ billNo })
   } catch (err) {
-    console.error('❌ GET next-bill-no error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
 // GET /stitching/customer/:customerNo
-// Get customer info (auto-fill) + loyalty points
 // ============================================================
 router.get('/customer/:customerNo', protect, async (req, res) => {
   try {
     const customerNo = req.params.customerNo?.trim()
-    if (!customerNo) {
-      return res.status(400).json({ message: 'customerNo required' })
-    }
+    if (!customerNo) return res.status(400).json({ message: 'customerNo required' })
 
     const lastBill = await findCustomerByNo(customerNo)
-
-    if (!lastBill) {
-      return res.json({ found: false })
-    }
+    if (!lastBill) return res.json({ found: false })
 
     res.json({
       found: true,
@@ -207,14 +176,12 @@ router.get('/customer/:customerNo', protect, async (req, res) => {
       },
     })
   } catch (err) {
-    console.error('❌ GET /stitching/customer/:customerNo error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
 // GET /stitching/next-customer-no
-// Auto-generate next customer number for a unit
 // ============================================================
 router.get('/next-customer-no', protect, async (req, res) => {
   try {
@@ -223,22 +190,17 @@ router.get('/next-customer-no', protect, async (req, res) => {
     const customerNo = await generateCustomerNo(unitNo)
     res.json({ customerNo })
   } catch (err) {
-    console.error('❌ GET next-customer-no error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
 // GET /stitching/reminders
-// Role check: Admin BLOCKED, only MD/CEO/MD Finance
 // ============================================================
 router.get('/reminders', protect, async (req, res) => {
   try {
-    // ✅ Admin blocked
     if (req.user.role === 'admin') {
-      return res.status(403).json({
-        message: 'Reminders are not available for admin role',
-      })
+      return res.status(403).json({ message: 'Reminders are not available for admin role' })
     }
 
     const { unitNo } = req.query
@@ -250,37 +212,162 @@ router.get('/reminders', protect, async (req, res) => {
     const dayAfter = new Date(tomorrow)
     dayAfter.setDate(dayAfter.getDate() + 1)
 
-    const filter = {
-      deliveryDate: { $gte: tomorrow, $lt: dayAfter },
-    }
-
-    // ✅ Unit filter for MD/CEO (if unit selected)
+    const filter = { deliveryDate: { $gte: tomorrow, $lt: dayAfter } }
     if (unitNo) filter.unitNo = unitNo
 
     const bills = await StitchingBill.find(filter).sort({ deliveryDate: 1 })
     res.json(bills)
   } catch (err) {
-    console.error('❌ GET /stitching/reminders error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching/dues/summary — Due total for Dashboard
+// MUST be before /:id route
+// ============================================================
+router.get('/dues/summary', protect, async (req, res) => {
+  try {
+    const { unitNo } = req.query
+
+    const matchStage = {
+      balance: { $gt: 0 },
+      status: { $ne: 'delivered' },
+    }
+
+    if (req.user.role === 'admin') {
+      matchStage.unitNo = req.user.unitNo
+    } else if (unitNo) {
+      matchStage.unitNo = unitNo
+    }
+
+    const agg = await StitchingBill.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$unitNo',
+          bills: { $sum: 1 },
+          totalDue: { $sum: '$balance' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ])
+
+    const unitWise = agg.map((u) => ({
+      unitNo: u._id,
+      bills: u.bills,
+      totalDue: u.totalDue,
+    }))
+
+    const totalDue = unitWise.reduce((s, u) => s + u.totalDue, 0)
+
+    res.json({ unitWise, totalDue })
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching/denominations/by-date
+// MUST be before /:id route
+// ============================================================
+router.get('/denominations/by-date', protect, async (req, res) => {
+  try {
+    const { from, to, unitNo } = req.query
+
+    const matchStage = {}
+    if (req.user.role === 'admin') {
+      matchStage.unitNo = req.user.unitNo
+    } else if (unitNo) {
+      matchStage.unitNo = unitNo
+    }
+
+    const bills = await StitchingBill.find(matchStage)
+      .select('paymentHistory unitNo billNo')
+      .lean()
+
+    const byDate = {}
+
+    bills.forEach((bill) => {
+      ;(bill.paymentHistory || []).forEach((p) => {
+        if (from && p.paymentDate < from) return
+        if (to && p.paymentDate > to) return
+        if (p.paymentMode !== 'cash') return
+
+        const d = p.paymentDate
+        if (!byDate[d]) {
+          byDate[d] = {
+            date: d,
+            totalAmount: 0,
+            bills: new Set(),
+            denominations: {},
+          }
+        }
+        byDate[d].totalAmount += Number(p.amountPaid || 0)
+        byDate[d].bills.add(bill.billNo)
+
+        ;(p.paymentReference?.cashDenominations || []).forEach((denom) => {
+          const val = Number(denom.denomination || 0)
+          const cnt = Number(denom.count || 0)
+          if (cnt > 0 && val > 0) {
+            byDate[d].denominations[val] = (byDate[d].denominations[val] || 0) + cnt
+          }
+        })
+      })
+    })
+
+    const result = Object.values(byDate)
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map((d) => ({
+        date: d.date,
+        totalAmount: d.totalAmount,
+        bills: d.bills.size,
+        denominations: Object.entries(d.denominations)
+          .map(([denom, count]) => ({
+            denomination: Number(denom),
+            count,
+            value: Number(denom) * count,
+          }))
+          .sort((a, b) => b.denomination - a.denomination),
+      }))
+
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// GET /stitching/:id/payments — payment history
+// MUST be before /:id route
+// ============================================================
+router.get('/:id/payments', protect, async (req, res) => {
+  try {
+    const bill = await StitchingBill.findById(req.params.id)
+    if (!bill) return res.status(404).json({ message: 'Bill not found' })
+
+    if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
+      return res.status(403).json({ message: 'Access denied' })
+    }
+
+    const history = (bill.paymentHistory || []).slice().sort((a, b) =>
+      a.paymentDate.localeCompare(b.paymentDate)
+    )
+    res.json(history)
+  } catch (err) {
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
 // GET /stitching (list + filter)
-// Unit-wise access control
 // ============================================================
 router.get('/', protect, async (req, res) => {
   try {
     const { unitNo, status, from, to, search, deliveryDate } = req.query
 
-    // ✅ DEBUG — verify unit param received
-    console.log('🔍 GET /stitching — role:', req.user.role, '| userUnit:', req.user.unitNo, '| queryUnitNo:', unitNo)
-
     const filter = {}
 
-    // ✅ Unit access:
-    // - Admin → forced to own unit
-    // - MD/CEO/MD Finance → respect query param (strict)
     if (req.user.role === 'admin') {
       filter.unitNo = req.user.unitNo
     } else if (unitNo && unitNo.trim()) {
@@ -289,7 +376,6 @@ router.get('/', protect, async (req, res) => {
 
     if (status) filter.status = status
 
-        // ✅ NEW — filter by deliveryDate (used by Dashboard Today's Delivery)
     if (deliveryDate) {
       const start = new Date(deliveryDate)
       start.setHours(0, 0, 0, 0)
@@ -298,7 +384,6 @@ router.get('/', protect, async (req, res) => {
       filter.deliveryDate = { $gte: start, $lte: end }
     }
 
-    // Filter by CREATED date
     if (from || to) {
       filter.createdAt = {}
       if (from) {
@@ -323,27 +408,34 @@ router.get('/', protect, async (req, res) => {
     }
 
     const bills = await StitchingBill.find(filter).sort({ createdAt: -1 })
-    res.json(bills)
+
+    // ✅ Attach lastPayment from paymentHistory
+    const enriched = bills.map((b) => {
+      const obj = b.toObject()
+      const history = obj.paymentHistory || []
+      const sorted = history.slice().sort((a, c) =>
+        c.paymentDate.localeCompare(a.paymentDate)
+      )
+      obj.lastPayment = sorted[0] || null
+      return obj
+    })
+
+    res.json(enriched)
   } catch (err) {
-    console.error('❌ GET /stitching error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
 // GET /stitching/reports
-// Query: ?from=&to=
-// Role: MD/CEO/MD_Finance only
 // ============================================================
 router.get('/reports', protect, async (req, res) => {
   try {
-    // ✅ Admin blocked
     if (req.user.role === 'admin') {
       return res.status(403).json({ message: 'Reports not available for admin' })
     }
 
     const { from, to } = req.query
-
     const matchStage = {}
 
     if (from || to) {
@@ -360,7 +452,6 @@ router.get('/reports', protect, async (req, res) => {
       }
     }
 
-    // ✅ Summary aggregates
     const summaryAgg = await StitchingBill.aggregate([
       { $match: matchStage },
       {
@@ -375,24 +466,15 @@ router.get('/reports', protect, async (req, res) => {
     ])
 
     const summary = summaryAgg[0] || {
-      totalBills: 0,
-      totalAmount: 0,
-      totalAdvance: 0,
-      totalBalance: 0,
+      totalBills: 0, totalAmount: 0, totalAdvance: 0, totalBalance: 0,
     }
 
-    // ✅ Status breakdown
     const statusAgg = await StitchingBill.aggregate([
       { $match: matchStage },
       { $group: { _id: '$status', count: { $sum: 1 } } },
     ])
+    const statusBreakdown = statusAgg.map((s) => ({ status: s._id, count: s.count }))
 
-    const statusBreakdown = statusAgg.map((s) => ({
-      status: s._id,
-      count: s.count,
-    }))
-
-    // ✅ Unit-wise breakdown
     const unitAgg = await StitchingBill.aggregate([
       { $match: matchStage },
       {
@@ -404,14 +486,10 @@ router.get('/reports', protect, async (req, res) => {
       },
       { $sort: { _id: 1 } },
     ])
-
     const unitBreakdown = unitAgg.map((u) => ({
-      unitNo: u._id,
-      count: u.count,
-      totalAmount: u.totalAmount,
+      unitNo: u._id, count: u.count, totalAmount: u.totalAmount,
     }))
 
-    // ✅ Top customers (by bill count)
     const customerAgg = await StitchingBill.aggregate([
       { $match: matchStage },
       {
@@ -426,7 +504,6 @@ router.get('/reports', protect, async (req, res) => {
       { $sort: { billCount: -1 } },
       { $limit: 10 },
     ])
-
     const topCustomers = customerAgg.map((c) => ({
       customerNo: c._id,
       customerName: c.customerName,
@@ -435,37 +512,21 @@ router.get('/reports', protect, async (req, res) => {
       totalAmount: c.totalAmount,
     }))
 
-    // ✅ Daily trend (last 30 days by default within range)
-    const trendMatch = { ...matchStage }
     const trendAgg = await StitchingBill.aggregate([
-      { $match: trendMatch },
+      { $match: matchStage },
       {
         $group: {
-          _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
-          },
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
           count: { $sum: 1 },
           amount: { $sum: '$amount' },
         },
       },
       { $sort: { _id: 1 } },
     ])
+    const dailyTrend = trendAgg.map((d) => ({ date: d._id, count: d.count, amount: d.amount }))
 
-    const dailyTrend = trendAgg.map((d) => ({
-      date: d._id,
-      count: d.count,
-      amount: d.amount,
-    }))
-
-    res.json({
-      summary,
-      statusBreakdown,
-      unitBreakdown,
-      topCustomers,
-      dailyTrend,
-    })
+    res.json({ summary, statusBreakdown, unitBreakdown, topCustomers, dailyTrend })
   } catch (err) {
-    console.error('❌ GET /stitching/reports error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
@@ -478,14 +539,12 @@ router.get('/:id', protect, async (req, res) => {
     const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Not found' })
 
-    // ✅ Admin can only see own unit bills
     if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
-      return res.status(403).json({ message: 'Access denied — other unit bill' })
+      return res.status(403).json({ message: 'Access denied' })
     }
 
     res.json(bill)
   } catch (err) {
-    console.error('❌ GET /stitching/:id error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
@@ -497,56 +556,37 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
   try {
     const data = { ...req.body }
 
-    // ✅ Admin → force own unit
     if (req.user.role === 'admin') {
       data.unitNo = req.user.unitNo
     }
 
-    // Parse measurements
     if (typeof data.measurements === 'string') {
-      try {
-        data.measurements = JSON.parse(data.measurements)
-      } catch (e) {
-        data.measurements = {}
-      }
+      try { data.measurements = JSON.parse(data.measurements) }
+      catch { data.measurements = {} }
     }
 
-    // Parse paymentReference
     if (typeof data.paymentReference === 'string') {
-      try {
-        data.paymentReference = JSON.parse(data.paymentReference)
-      } catch (e) {
-        data.paymentReference = { cashDenominations: [], gpayReference: '' }
-      }
+      try { data.paymentReference = JSON.parse(data.paymentReference) }
+      catch { data.paymentReference = { cashDenominations: [], gpayReference: '' } }
     }
 
-    // ============ Customer No handling ============
     let customerNo = data.customerNo?.trim()
-
-    // Auto-generate if not provided
-    if (!customerNo) {
-      customerNo = await generateCustomerNo(data.unitNo)
-    }
+    if (!customerNo) customerNo = await generateCustomerNo(data.unitNo)
     data.customerNo = customerNo
 
-    // ============ Generate bill no ============
     data.billNo = await generateBillNo(data.unitNo)
 
-    // ✅ Discount & Shipping Calculation
-    data.amount = Math.round(Number(data.amount || 0))
-    data.shippingAmount = Math.round(Number(data.shippingAmount || 0))
-    
-    // Discount logic based on amount
+    data.amount = Number(data.amount || 0)
+    data.shippingAmount = Number(data.shippingAmount || 0)
+
     let discountPercent = 0
-    if (data.amount >= 10000) discountPercent = 0 // Free Embroidery
+    if (data.amount >= 10000) discountPercent = 0
     else if (data.amount >= 5000) discountPercent = 5
     else if (data.amount >= 2500) discountPercent = 2.5
-    
-    data.discountPercent = discountPercent
-    // ✅ Round discount (0–4 down, 5+ up)
-    data.discountAmount = Math.round((data.amount * discountPercent) / 100)
 
-    // ============ Photos ============
+    data.discountPercent = discountPercent
+    data.discountAmount = (data.amount * discountPercent) / 100
+
     if (req.orderPhotoUrl) {
       data.orderPhoto = req.orderPhotoUrl
       data.orderPhotoId = req.orderPhotoId
@@ -556,48 +596,55 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
       data.referencePhotoId = req.referencePhotoId
     }
 
-    // ============ Amount calculations ============
     data.advance = Number(data.advance || 0)
     data.total   = data.amount + data.shippingAmount - data.discountAmount
     data.balance = data.total - data.advance
 
-    // ============ Advance validation ============
-    // Unit 2 → advance mandatory (must be > 0)
     if (data.unitNo === '002' && data.advance <= 0) {
-      return res.status(400).json({
-        message: 'Advance amount is mandatory for Unit 002',
-      })
+      return res.status(400).json({ message: 'Advance is mandatory for Unit 002' })
     }
 
+    // ✅ Build paymentHistory for initial advance
+    if (data.advance > 0) {
+      const paymentDate = getTodayStr()
+      data.paymentHistory = [
+        {
+          amountPaid: data.advance,
+          paymentDate,
+          paymentMode: data.paymentMode || 'cash',
+          paymentReference: data.paymentReference || {
+            cashDenominations: [],
+            gpayReference: '',
+          },
+          billBy: data.billBy || '',
+          recordedAt: new Date(),
+        },
+      ]
+    }
 
     const bill = await StitchingBill.create(data)
-
-    // ✅ Return with loyalty points included
     res.status(201).json(bill)
   } catch (err) {
-    console.error('❌ POST /stitching error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
-// PUT /stitching/:id (update)
+// PUT /stitching/:id (update) — with incremental payment logic
 // ============================================================
 router.put('/:id', protect, uploadPhotos, async (req, res) => {
   try {
     const data = { ...req.body }
 
-    // ✅ Admin → only own unit bills
     if (req.user.role === 'admin') {
-      const existing = await StitchingBill.findById(req.params.id)
-      if (!existing) return res.status(404).json({ message: 'Bill not found' })
-      if (existing.unitNo !== req.user.unitNo) {
+      const existingCheck = await StitchingBill.findById(req.params.id)
+      if (!existingCheck) return res.status(404).json({ message: 'Bill not found' })
+      if (existingCheck.unitNo !== req.user.unitNo) {
         return res.status(403).json({ message: 'Access denied — other unit bill' })
       }
-      data.unitNo = req.user.unitNo   // Force own unit
+      data.unitNo = req.user.unitNo
     }
 
-    // Remove immutable fields
     delete data._id
     delete data.createdAt
     delete data.updatedAt
@@ -605,42 +652,31 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
     delete data.billNo
     delete data.customerNo
     delete data.loyaltyPoints
+    delete data.paymentHistory     // ← handle separately
+    delete data.advance            // ← handle separately
+    delete data.balance            // ← handle separately
 
-    // Parse measurements (safe)
     if (typeof data.measurements === 'string') {
-      try {
-        data.measurements = JSON.parse(data.measurements)
-      } catch (e) {
-        delete data.measurements
-      }
+      try { data.measurements = JSON.parse(data.measurements) }
+      catch { delete data.measurements }
     }
 
-    // Parse paymentReference
     if (typeof data.paymentReference === 'string') {
-      try {
-        data.paymentReference = JSON.parse(data.paymentReference)
-      } catch (e) {
-        delete data.paymentReference
-      }
+      try { data.paymentReference = JSON.parse(data.paymentReference) }
+      catch { delete data.paymentReference }
     }
 
-    // Convert numeric fields
-    if (data.amount !== undefined && data.amount !== '') {
-      data.amount = Number(data.amount)
-    }
-    if (data.advance !== undefined) {
-      data.advance = data.advance === '' ? 0 : Number(data.advance)
-    }
-    if (data.shippingAmount !== undefined) {
-      data.shippingAmount = data.shippingAmount === '' ? 0 : Number(data.shippingAmount)
-    }
+    const existing = await StitchingBill.findById(req.params.id)
+    if (!existing) return res.status(404).json({ message: 'Bill not found' })
 
-    // ✅ Recalculate Discount & Total
-    const amtVal = data.amount !== undefined ? Number(data.amount) : (existing?.amount || 0)
-    const shipVal = data.shippingAmount !== undefined ? Number(data.shippingAmount) : (existing?.shippingAmount || 0)
+    const amtVal = data.amount !== undefined && data.amount !== ''
+      ? Number(data.amount) : existing.amount
+    const shipVal = data.shippingAmount !== undefined
+      ? (data.shippingAmount === '' ? 0 : Number(data.shippingAmount))
+      : existing.shippingAmount
 
     let discountPercent = 0
-    if (amtVal >= 10000) discountPercent = 0 // Free Embroidery
+    if (amtVal >= 10000) discountPercent = 0
     else if (amtVal >= 5000) discountPercent = 5
     else if (amtVal >= 2500) discountPercent = 2.5
 
@@ -648,37 +684,70 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
     data.discountAmount = (amtVal * discountPercent) / 100
     data.total = amtVal + shipVal - data.discountAmount
 
-    if (data.advance !== undefined || existing) {
-      const advVal = data.advance !== undefined ? data.advance : (existing?.advance || 0)
-      data.balance = data.total - Number(advVal || 0)
-    }
+    // ✅ Payment logic — idempotent (same date overwrite)
+    const paymentNow = data.payment !== undefined && data.payment !== ''
+      ? Number(data.payment) : 0
+    delete data.payment
 
-    // ============ Advance validation ============
-    const existing = await StitchingBill.findById(req.params.id)
-    const checkUnit = data.unitNo || existing?.unitNo
-    const checkAdvance = data.advance !== undefined ? data.advance : existing?.advance
+    if (paymentNow > 0) {
+      const paymentDate = getTodayStr()
+      const history = (existing.paymentHistory || []).slice()
 
-    if (checkUnit === '002' && checkAdvance <= 0) {
-      return res.status(400).json({
-        message: 'Advance amount is mandatory for Unit 002',
-      })
-    }
-
-    // ============ Photos — destroy old if replaced ============
-    if (req.orderPhotoUrl) {
-      // Destroy old order photo
-      if (existing?.orderPhotoId) {
-        await deleteFromCloudinary(existing.orderPhotoId)
+      // Sum of all previous payments EXCLUDING today's (being replaced)
+      // ✅ paymentNow = total paid so far (includes all previous)
+      if (paymentNow > data.total) {
+        return res.status(400).json({
+          message: `Payment ₹${paymentNow} exceeds bill total ₹${data.total}`,
+        })
       }
+
+      // Find existing today's entry
+      const idx = history.findIndex((p) => p.paymentDate === paymentDate)
+      const existingEntry = idx !== -1 ? history[idx] : null
+
+      const newEntry = {
+        amountPaid: paymentNow,
+        paymentDate,
+        paymentMode: data.paymentMode || existing.paymentMode || 'cash',
+        paymentReference: data.paymentReference || existing.paymentReference || {
+          cashDenominations: [],
+          gpayReference: '',
+        },
+        billBy: data.billBy || existing.billBy || '',
+        recordedAt: new Date(),
+        // ✅ Increment edit count if entry existed
+        editCount: existingEntry ? (existingEntry.editCount || 1) + 1 : 1,
+      }
+
+      if (idx !== -1) {
+        history[idx] = newEntry
+      } else {
+        history.push(newEntry)
+      }
+
+      data.paymentHistory = history
+      data.advance = paymentNow
+      data.balance = Math.max(0, data.total - data.advance)
+    } else {
+      // No new payment — recalc balance from existing advance
+      data.advance = existing.advance || 0
+      data.balance = Math.max(0, data.total - data.advance)
+    }
+
+    // Advance validation for Unit 002
+    const checkUnit = data.unitNo || existing.unitNo
+    if (checkUnit === '002' && (data.advance || 0) <= 0) {
+      return res.status(400).json({ message: 'Advance is mandatory for Unit 002' })
+    }
+
+    // Photos
+    if (req.orderPhotoUrl) {
+      if (existing.orderPhotoId) await deleteFromCloudinary(existing.orderPhotoId)
       data.orderPhoto = req.orderPhotoUrl
       data.orderPhotoId = req.orderPhotoId
     }
-
     if (req.referencePhotoUrl) {
-      // Destroy old reference photo
-      if (existing?.referencePhotoId) {
-        await deleteFromCloudinary(existing.referencePhotoId)
-      }
+      if (existing.referencePhotoId) await deleteFromCloudinary(existing.referencePhotoId)
       data.referencePhoto = req.referencePhotoUrl
       data.referencePhotoId = req.referencePhotoId
     }
@@ -689,10 +758,8 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
       { returnDocument: 'after', runValidators: true }
     )
 
-    if (!bill) return res.status(404).json({ message: 'Bill not found' })
     res.json(bill)
   } catch (err) {
-    console.error('❌ PUT /stitching error:', err.message)
     res.status(500).json({ message: err.message || 'Update failed' })
   }
 })
@@ -705,17 +772,14 @@ router.patch('/:id/status', protect, async (req, res) => {
     const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Bill not found' })
 
-    // ✅ Admin → only own unit bills
     if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
-      return res.status(403).json({ message: 'Access denied — other unit bill' })
+      return res.status(403).json({ message: 'Access denied' })
     }
 
     bill.status = req.body.status
     await bill.save()
-
     res.json(bill)
   } catch (err) {
-    console.error('❌ PATCH /stitching/:id/status error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
@@ -728,19 +792,16 @@ router.delete('/:id', protect, async (req, res) => {
     const bill = await StitchingBill.findById(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Bill not found' })
 
-    // ✅ Admin → only own unit bills
     if (req.user.role === 'admin' && bill.unitNo !== req.user.unitNo) {
-      return res.status(403).json({ message: 'Access denied — other unit bill' })
+      return res.status(403).json({ message: 'Access denied' })
     }
 
-    // ✅ Destroy images from Cloudinary
     if (bill.orderPhotoId)     await deleteFromCloudinary(bill.orderPhotoId)
     if (bill.referencePhotoId) await deleteFromCloudinary(bill.referencePhotoId)
 
     await StitchingBill.findByIdAndDelete(req.params.id)
     res.json({ message: 'Deleted' })
   } catch (err) {
-    console.error('❌ DELETE /stitching error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })

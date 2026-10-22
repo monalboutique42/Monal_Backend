@@ -69,6 +69,32 @@ const stitchingBillSchema = new mongoose.Schema(
       gpayReference: { type: String, default: '' },
     },
 
+        // ✅ NEW — Payment history (advance + due clearing entries)
+    paymentHistory: [
+      {
+        amountPaid: { type: Number, required: true, min: 0 },
+        paymentDate: { type: String, required: true },   // YYYY-MM-DD
+
+        paymentMode: { type: String, enum: ['cash', 'gpay'], default: 'cash' },
+
+        paymentReference: {
+          cashDenominations: [
+            {
+              denomination: { type: Number },
+              count:        { type: Number, default: 0 },
+            },
+          ],
+          gpayReference: { type: String, default: '' },
+        },
+
+        billBy: { type: String, default: '' },
+        recordedAt: { type: Date, default: Date.now },
+
+        // ✅ NEW — number of times this same-day entry was edited
+        editCount: { type: Number, default: 1, min: 1 },
+      },
+    ],
+
     // ============ Delivery ============
     deliveryDate: { type: Date, required: true },
 
