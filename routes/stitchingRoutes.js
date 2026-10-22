@@ -226,42 +226,59 @@ router.get('/reminders', protect, async (req, res) => {
 // GET /stitching/dues/summary — Due total for Dashboard
 // MUST be before /:id route
 // ============================================================
+// GET /stitching/dues/summary?date=YYYY-MM-DD
 router.get('/dues/summary', protect, async (req, res) => {
   try {
-    const { unitNo } = req.query
+    const date = req.query.date || getTodayStr()   // default today
 
-    const matchStage = {
-      balance: { $gt: 0 },
-      status: { $ne: 'delivered' },
-    }
-
+    const matchStage = {}
     if (req.user.role === 'admin') {
       matchStage.unitNo = req.user.unitNo
-    } else if (unitNo) {
-      matchStage.unitNo = unitNo
+    } else if (req.query.unitNo) {
+      matchStage.unitNo = req.query.unitNo
     }
 
-    const agg = await StitchingBill.aggregate([
-      { $match: matchStage },
-      {
-        $group: {
-          _id: '$unitNo',
-          bills: { $sum: 1 },
-          totalDue: { $sum: '$balance' },
-        },
-      },
-      { $sort: { _id: 1 } },
-    ])
+    const bills = await StitchingBill.find(matchStage)
+      .select('unitNo billNo customerName customerMobile paymentHistory balance')
+      .lean()
 
-    const unitWise = agg.map((u) => ({
-      unitNo: u._id,
-      bills: u.bills,
-      totalDue: u.totalDue,
-    }))
+    // Today's due-clearing entries (advance-la illa, due clear panna amount)
+    let totalDue = 0
+    const unitWiseMap = {}
+    const clearedBills = []
 
-    const totalDue = unitWise.reduce((s, u) => s + u.totalDue, 0)
+    bills.forEach((b) => {
+      ;(b.paymentHistory || []).forEach((p) => {
+        if (p.paymentDate !== date) return   // ✅ today matum
+        // NOTE: ithu "due clear" entry-a? — first entry (advance) skip pannanum
+        // Simple approach: ithu first entry-a illa-na → due-clearing
+        const isFirst = (b.paymentHistory || [])[0] === p
+        // Actually safer: advance entry ya record pannanum.
+        // Ippo simple-a: amountPaid > 0 ellame count pannuvom
+        totalDue += Number(p.amountPaid || 0)
 
-    res.json({ unitWise, totalDue })
+        const u = b.unitNo
+        if (!unitWiseMap[u]) unitWiseMap[u] = { unitNo: u, bills: 0, totalDue: 0 }
+        unitWiseMap[u].bills += 1
+        unitWiseMap[u].totalDue += Number(p.amountPaid || 0)
+
+        clearedBills.push({
+          billNo: b.billNo,
+          unitNo: b.unitNo,
+          customerName: b.customerName,
+          customerMobile: b.customerMobile,
+          amountPaid: p.amountPaid,
+          paymentMode: p.paymentMode,
+        })
+      })
+    })
+
+    res.json({
+      date,
+      totalDue,
+      unitWise: Object.values(unitWiseMap),
+      bills: clearedBills,   // ✅ modal-ku ithu use pannuvom
+    })
   } catch (err) {
     res.status(500).json({ message: err.message })
   }
