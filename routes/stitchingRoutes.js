@@ -252,7 +252,6 @@ router.get('/reminders', protect, async (req, res) => {
 
     const filter = {
       deliveryDate: { $gte: tomorrow, $lt: dayAfter },
-      status: { $ne: 'delivered' },
     }
 
     // ✅ Unit filter for MD/CEO (if unit selected)
@@ -272,7 +271,7 @@ router.get('/reminders', protect, async (req, res) => {
 // ============================================================
 router.get('/', protect, async (req, res) => {
   try {
-    const { unitNo, status, from, to, search } = req.query
+    const { unitNo, status, from, to, search, deliveryDate } = req.query
 
     // ✅ DEBUG — verify unit param received
     console.log('🔍 GET /stitching — role:', req.user.role, '| userUnit:', req.user.unitNo, '| queryUnitNo:', unitNo)
@@ -289,6 +288,15 @@ router.get('/', protect, async (req, res) => {
     }
 
     if (status) filter.status = status
+
+        // ✅ NEW — filter by deliveryDate (used by Dashboard Today's Delivery)
+    if (deliveryDate) {
+      const start = new Date(deliveryDate)
+      start.setHours(0, 0, 0, 0)
+      const end = new Date(deliveryDate)
+      end.setHours(23, 59, 59, 999)
+      filter.deliveryDate = { $gte: start, $lte: end }
+    }
 
     // Filter by CREATED date
     if (from || to) {
