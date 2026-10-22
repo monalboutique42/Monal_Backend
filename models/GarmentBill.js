@@ -54,6 +54,8 @@ const garmentBillSchema = new mongoose.Schema(
     },
 
     // ============ Amount ============
+    subTotal:        { type: Number, default: 0, min: 0 },   // ✅ ADD
+    shippingAmount:  { type: Number, default: 0, min: 0 },   // ✅ ADD
     totalAmount: { type: Number, required: true, min: 0 },
     totalItems:  { type: Number, required: true, min: 1 },
 

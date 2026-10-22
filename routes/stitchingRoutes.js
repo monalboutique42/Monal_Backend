@@ -533,8 +533,8 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
     data.billNo = await generateBillNo(data.unitNo)
 
     // ✅ Discount & Shipping Calculation
-    data.amount = Number(data.amount || 0)
-    data.shippingAmount = Number(data.shippingAmount || 0)
+    data.amount = Math.round(Number(data.amount || 0))
+    data.shippingAmount = Math.round(Number(data.shippingAmount || 0))
     
     // Discount logic based on amount
     let discountPercent = 0
@@ -543,7 +543,8 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
     else if (data.amount >= 2500) discountPercent = 2.5
     
     data.discountPercent = discountPercent
-    data.discountAmount = (data.amount * discountPercent) / 100
+    // ✅ Round discount (0–4 down, 5+ up)
+    data.discountAmount = Math.round((data.amount * discountPercent) / 100)
 
     // ============ Photos ============
     if (req.orderPhotoUrl) {
@@ -556,8 +557,8 @@ router.post('/', protect, uploadPhotos, async (req, res) => {
     }
 
     // ============ Amount calculations ============
-    data.total   = data.amount + data.shippingAmount - data.discountAmount
     data.advance = Number(data.advance || 0)
+    data.total   = data.amount + data.shippingAmount - data.discountAmount
     data.balance = data.total - data.advance
 
     // ============ Advance validation ============
@@ -627,11 +628,11 @@ router.put('/:id', protect, uploadPhotos, async (req, res) => {
     if (data.amount !== undefined && data.amount !== '') {
       data.amount = Number(data.amount)
     }
-    if (data.total !== undefined && data.total !== '') {
-      data.total = Number(data.total)
-    }
     if (data.advance !== undefined) {
       data.advance = data.advance === '' ? 0 : Number(data.advance)
+    }
+    if (data.shippingAmount !== undefined) {
+      data.shippingAmount = data.shippingAmount === '' ? 0 : Number(data.shippingAmount)
     }
 
     // ✅ Recalculate Discount & Total
