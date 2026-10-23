@@ -14,22 +14,25 @@ const padCode = (val) => {
 }
 
 const buildItemCode = (productCode, itemNo) => {
-  return `${padCode(productCode)}${padCode(itemNo)}`
+  return `${productCode}${padCode(itemNo)}`
 }
 
-async function peekNextSeq(counterId, pad = 2) {
-  const counter = await GarmentCounter.findById(counterId)
-  const next = (counter?.seq || 0) + 1
-  return String(next).padStart(pad, '0')
+// ✅ FIX — quantity-safe availability check
+const getAvailableQty = (variant) => {
+  const total = Number(variant?.quantity ?? 0)
+  const reserved = Number(variant?.reservedQty ?? 0)
+  return Math.max(0, total - reserved)
 }
 
-async function bumpSeq(counterId, pad = 2) {
-  const counter = await GarmentCounter.findByIdAndUpdate(
-    counterId,
-    { $inc: { seq: 1 } },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
-  )
-  return String(counter.seq).padStart(pad, '0')
+// ✅ FIX — auto-update variant status based on quantity
+const syncVariantStatus = (variant) => {
+  const qty = Number(variant.quantity ?? 0)
+  if (qty <= 0) {
+    variant.status = 'sold'
+  } else if (variant.status === 'sold') {
+    // restore to instock if quantity added back
+    variant.status = 'instock'
+  }
 }
 
 // ============================================================
@@ -51,7 +54,6 @@ async function generateGarmentBillNo(firstItemCode) {
     if (!isNaN(lastSeq)) nextSeq = lastSeq + 1
   }
 
-  // ✅ 2-digit until 99, then natural (3+ digits)
   const seqStr = nextSeq <= 99 ? String(nextSeq).padStart(2, '0') : String(nextSeq)
   return `${prefix}${seqStr}`
 }
@@ -69,7 +71,6 @@ router.get('/next-customer-no', protect, async (req, res) => {
     bills.forEach((b) => {
       const cno = (b.customerNo || '').trim().toUpperCase()
 
-      // ✅ Check GR first (longer prefix)
       let m = cno.match(/^GR(\d+)$/)
       if (m) {
         const n = parseInt(m[1], 10)
@@ -77,7 +78,6 @@ router.get('/next-customer-no', protect, async (req, res) => {
         return
       }
 
-      // ✅ Then plain G
       m = cno.match(/^G(\d+)$/)
       if (m) {
         const n = parseInt(m[1], 10)
@@ -89,11 +89,8 @@ router.get('/next-customer-no', protect, async (req, res) => {
     const nextGR = maxGR + 1
 
     res.json({
-      // Default = G series
       customerNo: `G${String(nextG).padStart(2, '0')}`,
       nextNum: nextG,
-
-      // Both suggestions for the dropdown
       suggestions: [
         { series: 'G',  customerNo: `G${String(nextG).padStart(2, '0')}`,  nextNum: nextG  },
         { series: 'GR', customerNo: `GR${String(nextGR).padStart(2, '0')}`, nextNum: nextGR },
@@ -106,57 +103,23 @@ router.get('/next-customer-no', protect, async (req, res) => {
 })
 
 // ============================================================
-// PRODUCT CODE — PREVIEW
+// ✅ PRODUCT CODE — MANUAL INPUT ONLY (no S/M/T series)
 // ============================================================
-router.get('/next-product-code', protect, async (req, res) => {
+// GET /garment/product-exists?productCode=XXX
+// Returns: { exists, description, variantsCount, productCode }
+router.get('/product-exists', protect, async (req, res) => {
   try {
-    const stocks = await GarmentStock.find().select('productCode').lean()
+    const pc = (req.query.productCode || '').trim().toUpperCase()
+    if (!pc) return res.json({ exists: false })
 
-    // ✅ Track max per series
-    const maxBySeries = { S: 0, M: 0, T: 0 }
-    let maxNumeric = 0
-
-    stocks.forEach((s) => {
-      const code = (s.productCode || '').trim().toUpperCase()
-
-      // Numeric legacy (01, 02...) — only used to know we shouldn't suggest these
-      const numMatch = code.match(/^(\d+)$/)
-      if (numMatch) {
-        const n = parseInt(numMatch[1], 10)
-        if (!isNaN(n) && n > maxNumeric) maxNumeric = n
-        return
-      }
-
-      // S / M / T prefixes
-      const seriesMatch = code.match(/^([SMT])(\d+)$/)
-      if (seriesMatch) {
-        const letter = seriesMatch[1]
-        const n = parseInt(seriesMatch[2], 10)
-        if (!isNaN(n) && n > maxBySeries[letter]) maxBySeries[letter] = n
-      }
-    })
-
-    // Also respect counters if they exist (in case legacy counter was used)
-    for (const letter of ['S', 'M', 'T']) {
-      const counter = await GarmentCounter.findById(`product_code_${letter}`)
-      if (counter?.seq && counter.seq > maxBySeries[letter]) {
-        maxBySeries[letter] = counter.seq
-      }
-    }
-
-    const nextS = maxBySeries.S + 1
-    const nextM = maxBySeries.M + 1
-    const nextT = maxBySeries.T + 1
+    const stock = await GarmentStock.findOne({ productCode: pc }).lean()
+    if (!stock) return res.json({ exists: false, productCode: pc })
 
     res.json({
-      // Default = S series
-      productCode: `S${padCode(nextS)}`,
-      nextNum: nextS,
-      suggestions: [
-        { series: 'S', productCode: `S${padCode(nextS)}`, nextNum: nextS },
-        { series: 'M', productCode: `M${padCode(nextM)}`, nextNum: nextM },
-        { series: 'T', productCode: `T${padCode(nextT)}`, nextNum: nextT },
-      ],
+      exists: true,
+      productCode: stock.productCode,
+      description: stock.description || '',
+      variantsCount: stock.variants?.length || 0,
     })
   } catch (err) {
     res.status(500).json({ message: err.message })
@@ -164,7 +127,7 @@ router.get('/next-product-code', protect, async (req, res) => {
 })
 
 // ============================================================
-// ITEM NO — PREVIEW (per product)
+// ✅ NEXT ITEM NO — per product (for preview)
 // ============================================================
 router.get('/next-item-no', protect, async (req, res) => {
   try {
@@ -175,9 +138,15 @@ router.get('/next-item-no', protect, async (req, res) => {
     const stock = await GarmentStock.findOne({ productCode: cleanCode }).lean()
     const existing = stock?.variants?.length || 0
 
+    let maxNum = 0
+    ;(stock?.variants || []).forEach((v) => {
+      const n = parseInt(v.itemNo, 10)
+      if (!isNaN(n) && n > maxNum) maxNum = n
+    })
+
     const counter = await GarmentCounter.findById(`item_no_${cleanCode}`)
     const maxFromCounter = counter?.seq || 0
-    const nextNum = Math.max(existing, maxFromCounter) + 1
+    const nextNum = Math.max(existing, maxNum, maxFromCounter) + 1
 
     res.json({ itemNo: padCode(nextNum), nextNum })
   } catch (err) {
@@ -236,19 +205,17 @@ router.get('/customer/:customerNo', protect, async (req, res) => {
 // ============================================================
 router.get('/bills', protect, async (req, res) => {
   try {
-const { productCode, paymentMode, from, to, search, customerSeries } = req.query
-const filter = {}
+    const { productCode, paymentMode, from, to, search, customerSeries } = req.query
+    const filter = {}
 
-if (paymentMode) filter.paymentMode = paymentMode
-if (productCode) filter['items.productCode'] = productCode
+    if (paymentMode) filter.paymentMode = paymentMode
+    if (productCode) filter['items.productCode'] = productCode
 
-// ✅ Customer series filter: 'G' or 'GR'
-if (customerSeries === 'GR') {
-  filter.customerNo = { $regex: '^GR\\d+$', $options: 'i' }
-} else if (customerSeries === 'G') {
-  // G followed by digits, but NOT GR
-  filter.customerNo = { $regex: '^G\\d+$', $options: 'i' }
-}
+    if (customerSeries === 'GR') {
+      filter.customerNo = { $regex: '^GR\\d+$', $options: 'i' }
+    } else if (customerSeries === 'G') {
+      filter.customerNo = { $regex: '^G\\d+$', $options: 'i' }
+    }
 
     if (from || to) {
       filter.createdAt = {}
@@ -295,13 +262,212 @@ router.get('/bills/:id', protect, async (req, res) => {
 })
 
 // ============================================================
-// BILLS — CREATE
+// ✅ CART RESERVE — cart-la add pannaa quantity reserve
+// POST /garment/reserve
+// Body: { productCode, itemNo }
+// ============================================================
+router.post('/reserve', protect, async (req, res) => {
+  try {
+    const { productCode, itemNo } = req.body
+        const qty = Math.max(1, Number(req.body.qty || 1))   // ✅ NEW
+
+    if (!productCode || !itemNo) {
+      return res.status(400).json({ message: 'productCode and itemNo required' })
+    }
+
+    const stock = await GarmentStock.findOne({ productCode: productCode.trim().toUpperCase() })
+    if (!stock) return res.status(404).json({ message: 'Stock not found' })
+
+    const variant = stock.variants.find((v) => v.itemNo === itemNo)
+    if (!variant) return res.status(404).json({ message: 'Variant not found' })
+
+    const available = getAvailableQty(variant)
+    if (available <= 0) {
+      return res.status(400).json({
+        message: `Not enough stock. Available: ${available}`,
+      })
+    }
+
+    variant.reservedQty = Number(variant.reservedQty || 0) + 1
+    await stock.save()
+
+    res.json({
+      success: true,
+      available: getAvailableQty(variant),
+      reservedQty: variant.reservedQty,
+    })
+  } catch (err) {
+    console.error('❌ POST /garment/reserve error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// ✅ CART RELEASE — cart-la irundhu remove pannaa release
+// POST /garment/release
+// Body: { productCode, itemNo }
+// ============================================================
+router.post('/release', protect, async (req, res) => {
+  try {
+    const { productCode, itemNo } = req.body
+    if (!productCode || !itemNo) {
+      return res.status(400).json({ message: 'productCode and itemNo required' })
+    }
+
+    const stock = await GarmentStock.findOne({ productCode: productCode.trim().toUpperCase() })
+    if (!stock) return res.status(404).json({ message: 'Stock not found' })
+
+    const variant = stock.variants.find((v) => v.itemNo === itemNo)
+    if (!variant) return res.status(404).json({ message: 'Variant not found' })
+
+    const qty = Math.max(1, Number(req.body.qty || 1))
+    variant.reservedQty = Math.max(0, Number(variant.reservedQty || 0) - 1)
+    await stock.save()
+
+    res.json({
+      success: true,
+      available: getAvailableQty(variant),
+      reservedQty: variant.reservedQty,
+    })
+  } catch (err) {
+    console.error('❌ POST /garment/release error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// BILLS — CREATE (with quantity decrement + reservedQty release)
 // ============================================================
 router.post('/bills', protect, async (req, res) => {
   try {
     const data = { ...req.body }
 
     // Validation
+    if (!data.customerNo?.trim())   return res.status(400).json({ message: 'Customer No required' })
+    if (!data.customerName?.trim()) return res.status(400).json({ message: 'Customer name required' })
+    if (!/^[0-9]{10}$/.test(data.customerMobile)) {
+      return res.status(400).json({ message: 'Valid 10-digit mobile required' })
+    }
+    if (!data.billBy?.trim()) return res.status(400).json({ message: 'Bill By required' })
+    if (!Array.isArray(data.items) || data.items.length === 0) {
+      return res.status(400).json({ message: 'At least one item required' })
+    }
+
+    // Validate items + compute amount
+    for (const item of data.items) {
+      if (!item.productCode || !item.itemNo) {
+        return res.status(400).json({ message: 'Each item needs productCode and itemNo' })
+      }
+      if (!item.rate || item.rate <= 0) {
+        return res.status(400).json({ message: 'Each item needs valid rate' })
+      }
+      if (!item.qty || item.qty <= 0) {
+        return res.status(400).json({ message: 'Each item needs valid quantity' })
+      }
+      item.productCode = item.productCode.trim().toUpperCase()
+      item.rate     = Number(item.rate)
+      item.qty      = Number(item.qty)
+      item.amount   = item.rate * item.qty   // ✅ rate × qty
+      item.itemCode = buildItemCode(item.productCode, item.itemNo)
+    }
+
+    // Payment validation
+    if (data.paymentMode === 'cash') {
+      const hasDenom = data.paymentReference?.cashDenominations?.some((d) => Number(d.count) > 0)
+      if (!hasDenom) return res.status(400).json({ message: 'Enter at least one cash denomination' })
+    }
+    if (data.paymentMode === 'gpay') {
+      if (!data.paymentReference?.gpayReference?.trim()) {
+        return res.status(400).json({ message: 'GPay reference required' })
+      }
+    }
+
+    // Stock validation + quantity check
+    const stockIssues = []
+    const stockDocs = {}
+    for (const item of data.items) {
+      const pc = item.productCode
+      if (!stockDocs[pc]) {
+        stockDocs[pc] = await GarmentStock.findOne({ productCode: pc })
+      }
+      const stock = stockDocs[pc]
+      if (!stock) {
+        stockIssues.push(`Stock not found for product ${pc}`)
+        continue
+      }
+      const variant = stock.variants.find((v) => v.itemNo === item.itemNo)
+      if (!variant) {
+        stockIssues.push(`Variant not found: ${pc}/${item.itemNo}`)
+        continue
+      }
+
+      const available = getAvailableQty(variant)
+      if (available < Number(item.qty || 1)) {
+        stockIssues.push(`Only ${available} available: ${pc}/${item.itemNo}`)
+      }
+
+// ✅ Only check if purchasePrice > 0
+if (Number(variant.purchasePrice) > 0 && item.rate < variant.purchasePrice) {
+  stockIssues.push(
+    `Billing price ₹${item.rate} is below purchase price ₹${variant.purchasePrice} for ${pc}/${item.itemNo}`
+  )
+}
+    }
+
+    if (stockIssues.length > 0) {
+      return res.status(400).json({ message: 'Stock issues:\n' + stockIssues.join('\n') })
+    }
+
+    // Totals
+    data.subTotal      = data.items.reduce((sum, i) => sum + i.amount, 0)
+    data.shippingAmount = Number(data.shippingAmount || 0)
+    data.discountAmount = Number(data.discountAmount || 0)
+    data.totalAmount = Math.max(0, data.subTotal + data.shippingAmount - data.discountAmount)
+    data.totalItems  = data.items.length
+
+    // Bill No
+    const firstItemCode = data.items[0].itemCode
+    data.billNo = await generateGarmentBillNo(firstItemCode)
+
+    // Loyalty
+    data.loyaltyPoints = 5
+
+    // Save
+    const bill = await GarmentBill.create(data)
+
+    // ✅ Decrement quantity + increment soldQty + release reservedQty + auto status
+    for (const item of data.items) {
+      const stock = stockDocs[item.productCode]
+      const variant = stock.variants.find((v) => v.itemNo === item.itemNo)
+      const qty = Number(item.qty || 1)
+
+      variant.quantity = Math.max(0, Number(variant.quantity || 0) - qty)
+      variant.soldQty = Number(variant.soldQty || 0) + qty   // ✅ NEW
+      variant.reservedQty = Math.max(0, Number(variant.reservedQty || 0) - qty)
+      syncVariantStatus(variant)
+
+      await stock.save()
+    }
+
+    res.status(201).json(bill)
+  } catch (err) {
+    console.error('❌ POST /garment/bills error:', err.message)
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// BILLS — UPDATE (edit) — quantity adjustments on item changes
+// ============================================================
+router.put('/bills/:id', protect, async (req, res) => {
+  try {
+    const billId = req.params.id
+    const existing = await GarmentBill.findById(billId)
+    if (!existing) return res.status(404).json({ message: 'Bill not found' })
+
+    const data = { ...req.body }
+
+    // Validate
     if (!data.customerNo?.trim())   return res.status(400).json({ message: 'Customer No required' })
     if (!data.customerName?.trim()) return res.status(400).json({ message: 'Customer name required' })
     if (!/^[0-9]{10}$/.test(data.customerMobile)) {
@@ -320,6 +486,7 @@ router.post('/bills', protect, async (req, res) => {
       if (!item.rate || item.rate <= 0) {
         return res.status(400).json({ message: 'Each item needs valid rate' })
       }
+      item.productCode = item.productCode.trim().toUpperCase()
       item.rate     = Number(item.rate)
       item.amount   = item.rate * 1
       item.itemCode = buildItemCode(item.productCode, item.itemNo)
@@ -336,69 +503,101 @@ router.post('/bills', protect, async (req, res) => {
       }
     }
 
-    // Stock status check
-    // Stock status + purchase price check
+    // Totals
+    data.subTotal      = data.items.reduce((sum, i) => sum + i.amount, 0)
+    data.shippingAmount = Number(data.shippingAmount || 0)
+    data.discountAmount = Number(data.discountAmount || 0)
+    data.totalAmount = Math.max(0, data.subTotal + data.shippingAmount - data.discountAmount)
+    data.totalItems  = data.items.length
+
+    // ✅ Restore old items' quantities + revert soldQty
+    for (const oldItem of existing.items) {
+      const stock = await GarmentStock.findOne({ productCode: oldItem.productCode })
+      if (!stock) continue
+      const variant = stock.variants.find((v) => v.itemNo === oldItem.itemNo)
+      if (!variant) continue
+      const oldQty = Number(oldItem.qty || 1)
+      variant.quantity = Number(variant.quantity || 0) + oldQty
+      variant.soldQty = Math.max(0, Number(variant.soldQty || 0) - oldQty)   // ✅
+      syncVariantStatus(variant)
+      await stock.save()
+    }
+
+    // ✅ Apply new items — decrement + validate
     const stockIssues = []
+    const stockDocs = {}
     for (const item of data.items) {
-      const stock = await GarmentStock.findOne({ productCode: item.productCode })
+      const pc = item.productCode
+      if (!stockDocs[pc]) {
+        stockDocs[pc] = await GarmentStock.findOne({ productCode: pc })
+      }
+      const stock = stockDocs[pc]
       if (!stock) {
-        stockIssues.push(`Stock not found for product ${item.productCode}`)
+        stockIssues.push(`Stock not found for product ${pc}`)
         continue
       }
       const variant = stock.variants.find((v) => v.itemNo === item.itemNo)
       if (!variant) {
-        stockIssues.push(`Variant not found: ${item.productCode}/${item.itemNo}`)
+        stockIssues.push(`Variant not found: ${pc}/${item.itemNo}`)
         continue
       }
-      if (variant.status !== 'instock') {
-        stockIssues.push(`Not in stock: ${item.productCode}/${item.itemNo} (${variant.status})`)
+      const qty = Number(variant.quantity ?? 0)
+      if (qty <= 0) {
+        stockIssues.push(`Out of stock: ${pc}/${item.itemNo}`)
       }
-      // ✅ NEW: Billing rate must be >= purchase price
-      if (item.rate < variant.purchasePrice) {
-        stockIssues.push(
-          `Billing price ₹${item.rate} is below purchase price ₹${variant.purchasePrice} for ${item.productCode}/${item.itemNo}`
-        )
-      }
+if (Number(variant.purchasePrice) > 0 && item.rate < variant.purchasePrice) {
+  stockIssues.push(
+    `Billing price ₹${item.rate} is below purchase price ₹${variant.purchasePrice} for ${pc}/${item.itemNo}`
+  )
+}
     }
 
     if (stockIssues.length > 0) {
+      // Rollback: restore old quantities again (since we restored them above)
+      for (const oldItem of existing.items) {
+        const stock = await GarmentStock.findOne({ productCode: oldItem.productCode })
+        if (!stock) continue
+        const variant = stock.variants.find((v) => v.itemNo === oldItem.itemNo)
+        if (!variant) continue
+        variant.quantity = Math.max(0, Number(variant.quantity || 0) - 1)
+        syncVariantStatus(variant)
+        await stock.save()
+      }
       return res.status(400).json({ message: 'Stock issues:\n' + stockIssues.join('\n') })
     }
 
-    // Totals
-    data.totalAmount = data.items.reduce((sum, i) => sum + i.amount, 0)
-    data.totalItems  = data.items.length
-
-    // Bill No
-    const firstItemCode = data.items[0].itemCode
-    data.billNo = await generateGarmentBillNo(firstItemCode)
-
-    // Loyalty
-    data.loyaltyPoints = 5
-
-    // Save
-    const bill = await GarmentBill.create(data)
-
-    // Mark variants SOLD
+    // Decrement new items + increment soldQty
     for (const item of data.items) {
-      await GarmentStock.updateOne(
-        { productCode: item.productCode, 'variants.itemNo': item.itemNo },
-        { $set: { 'variants.$.status': 'sold' } }
-      )
+      const stock = stockDocs[item.productCode]
+      const variant = stock.variants.find((v) => v.itemNo === item.itemNo)
+      const qty = Number(item.qty || 1)
+      variant.quantity = Math.max(0, Number(variant.quantity || 0) - qty)
+      variant.soldQty = Number(variant.soldQty || 0) + qty   // ✅ NEW
+      syncVariantStatus(variant)
+      await stock.save()
     }
 
-    // Bump customer counter
- 
+    // Update bill
+    delete data._id
+    delete data.billNo
+    delete data.createdAt
+    delete data.loyaltyPoints
 
-    res.status(201).json(bill)
+    const updated = await GarmentBill.findByIdAndUpdate(
+      billId,
+      { $set: data },
+      { returnDocument: 'after', runValidators: true }
+    )
+
+    res.json(updated)
   } catch (err) {
-    console.error('❌ POST /garment/bills error:', err.message)
+    console.error('❌ PUT /garment/bills error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })
 
 // ============================================================
-// PATCH VARIANT STATUS
+// PATCH VARIANT STATUS (manual override)
 // ============================================================
 router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res) => {
   try {
@@ -415,7 +614,15 @@ router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res)
     const variant = stock.variants.find((v) => v.itemNo === itemNo)
     if (!variant) return res.status(404).json({ message: 'Variant not found' })
 
+    const oldStatus = variant.status
     variant.status = status
+
+    // ✅ Return → auto-increment quantity
+    if (status === 'return' && oldStatus !== 'return') {
+      variant.quantity = Number(variant.quantity || 0) + 1
+    }
+
+    // ✅ Manual override → don't auto-sync (user wants this status)
     await stock.save()
 
     res.json(stock)
@@ -426,12 +633,9 @@ router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res)
 
 // ============================================================
 // GET /garment/reports
-// Query: ?from=&to=
-// Role: MD/CEO/MD_Finance only
 // ============================================================
 router.get('/reports', protect, async (req, res) => {
   try {
-    // ✅ Admin blocked
     if (req.user.role === 'admin') {
       return res.status(403).json({ message: 'Reports not available for admin' })
     }
@@ -453,7 +657,6 @@ router.get('/reports', protect, async (req, res) => {
       }
     }
 
-    // ✅ Summary
     const summaryAgg = await GarmentBill.aggregate([
       { $match: matchStage },
       {
@@ -472,12 +675,8 @@ router.get('/reports', protect, async (req, res) => {
       totalItems: 0,
     }
 
-    // ============ PROFIT CALCULATION ============
-    // For each bill, sum up (item.rate - purchasePrice) per item
-    // Need to join with GarmentStock to get purchasePrice
     const bills = await GarmentBill.find(matchStage).lean()
 
-    // Fetch all relevant stock in one go
     const productCodes = [...new Set(
       bills.flatMap((b) => (b.items || []).map((it) => it.productCode))
     )]
@@ -486,7 +685,6 @@ router.get('/reports', protect, async (req, res) => {
       productCode: { $in: productCodes },
     }).lean()
 
-    // Build lookup map: { productCode: { itemNo: purchasePrice } }
     const purchaseLookup = {}
     stocks.forEach((s) => {
       purchaseLookup[s.productCode] = {}
@@ -495,9 +693,8 @@ router.get('/reports', protect, async (req, res) => {
       })
     })
 
-    // Compute profit
     let totalProfit = 0
-    const productStats = {} // { productCode: { qty, revenue, profit, description } }
+    const productStats = {}
 
     bills.forEach((bill) => {
       ;(bill.items || []).forEach((it) => {
@@ -526,12 +723,10 @@ router.get('/reports', protect, async (req, res) => {
       ? ((totalProfit / summary.totalRevenue) * 100).toFixed(1)
       : 0
 
-    // ✅ Top selling products
     const topProducts = Object.values(productStats)
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 10)
 
-    // ✅ Payment mode breakdown
     const paymentAgg = await GarmentBill.aggregate([
       { $match: matchStage },
       {
@@ -548,7 +743,6 @@ router.get('/reports', protect, async (req, res) => {
       totalAmount: p.totalAmount,
     }))
 
-    // ✅ Top customers
     const customerAgg = await GarmentBill.aggregate([
       { $match: matchStage },
       {
@@ -571,7 +765,6 @@ router.get('/reports', protect, async (req, res) => {
       totalAmount: c.totalAmount,
     }))
 
-    // ✅ Daily trend
     const trendAgg = await GarmentBill.aggregate([
       { $match: matchStage },
       {
@@ -609,18 +802,24 @@ router.get('/reports', protect, async (req, res) => {
 })
 
 // ============================================================
-// BILLS — DELETE (restore stock)
+// BILLS — DELETE (restore stock quantity)
 // ============================================================
 router.delete('/bills/:id', protect, async (req, res) => {
   try {
     const bill = await GarmentBill.findByIdAndDelete(req.params.id)
     if (!bill) return res.status(404).json({ message: 'Bill not found' })
 
+    // ✅ Restore quantity + revert soldQty
     for (const item of bill.items) {
-      await GarmentStock.updateOne(
-        { productCode: item.productCode, 'variants.itemNo': item.itemNo },
-        { $set: { 'variants.$.status': 'instock' } }
-      ).catch(() => {})
+      const stock = await GarmentStock.findOne({ productCode: item.productCode })
+      if (!stock) continue
+      const variant = stock.variants.find((v) => v.itemNo === item.itemNo)
+      if (!variant) continue
+      const qty = Number(item.qty || 1)
+      variant.quantity = Number(variant.quantity || 0) + qty
+      variant.soldQty = Math.max(0, Number(variant.soldQty || 0) - qty)   // ✅
+      syncVariantStatus(variant)
+      await stock.save()
     }
 
     res.json({ message: 'Deleted' })
@@ -655,17 +854,25 @@ router.get('/stock', protect, async (req, res) => {
       stocks = stocks.filter((s) => s.variants.some((v) => v.status === status))
     }
 
-    const isAdmin = req.user?.role === 'admin'
-    const sanitized = isAdmin
-      ? stocks.map((s) => {
+    // ✅ Only MD/CEO/MD_finance see purchasePrice + seller details
+    // Admin + staff (normal user) — hide
+    const canSeeSeller = ['md', 'md_finance', 'ceo'].includes(req.user?.role)
+
+    const sanitized = canSeeSeller
+      ? stocks
+      : stocks.map((s) => {
           const obj = s.toObject()
+          // ✅ Hide buying cost + seller details
+          obj.variants = (obj.variants || []).map((v) => {
+            const { purchasePrice, ...rest } = v
+            return rest
+          })
           delete obj.sellerName
           delete obj.sellerMobile
           delete obj.sellerAddress
           delete obj.sellerAddedBy
           return obj
         })
-      : stocks
 
     res.json(sanitized)
   } catch (err) {
@@ -674,168 +881,121 @@ router.get('/stock', protect, async (req, res) => {
 })
 
 // ============================================================
-// STOCK — CREATE
-// ✅ NEW: If productCode exists → APPEND variants
-// ✅ NEW: productCode editable (user types)
+// STOCK — CREATE (manual product code, quantity, append-mode)
 // ============================================================
 router.post('/stock', protect, async (req, res) => {
   try {
     const data = { ...req.body }
 
-    // Validate variants
     if (!Array.isArray(data.variants) || data.variants.length === 0) {
       return res.status(400).json({ message: 'At least one variant required' })
     }
 
-    // ---------- If productCode provided → check existing ----------
-    if (data.productCode?.trim()) {
-      const existing = await GarmentStock.findOne({ productCode: data.productCode.trim() })
+    if (!data.productCode?.trim()) {
+      return res.status(400).json({ message: 'Product Code required' })
+    }
 
-      if (existing) {
-        // ✅ APPEND mode: add new variants to existing product
-        const existingItemNos = existing.variants.map((v) => v.itemNo)
-        let maxNum = 0
-        existingItemNos.forEach((n) => {
-          const num = parseInt(n, 10)
-          if (!isNaN(num) && num > maxNum) maxNum = num
-        })
+    const pc = data.productCode.trim().toUpperCase()
+    data.productCode = pc
 
-        const counter = await GarmentCounter.findById(`item_no_${existing.productCode}`)
-        if (counter?.seq && counter.seq > maxNum) maxNum = counter.seq
+    // Check existing product
+    const existing = await GarmentStock.findOne({ productCode: pc })
 
-        let nextNum = maxNum + 1
+    if (existing) {
+      // ✅ APPEND mode
+      const existingItemNos = existing.variants.map((v) => v.itemNo)
+      let maxNum = 0
+      existingItemNos.forEach((n) => {
+        const num = parseInt(n, 10)
+        if (!isNaN(num) && num > maxNum) maxNum = num
+      })
 
-        for (const v of data.variants) {
-          if (!v.colour?.trim()) return res.status(400).json({ message: 'Variant colour required' })
-          if (!v.size?.trim())   return res.status(400).json({ message: 'Variant size required' })
-          if (!v.purchasePrice || v.purchasePrice <= 0) {
-            return res.status(400).json({ message: 'Variant purchase price required' })
-          }
-          if (!v.sellingPrice || v.sellingPrice <= 0) {
-            return res.status(400).json({ message: 'Variant selling price required' })
-          }
-          if (Number(v.sellingPrice) < Number(v.purchasePrice)) {
-            return res.status(400).json({ message: 'Selling price cannot be less than purchase price' })
-          }
+      const counter = await GarmentCounter.findById(`item_no_${pc}`)
+      if (counter?.seq && counter.seq > maxNum) maxNum = counter.seq
 
-// Always auto-assign new itemNo (ignore user's itemNo)
-v.itemNo = padCode(nextNum)
-nextNum += 1
+      let nextNum = maxNum + 1
 
-v.description = v.description?.trim() || ''
-v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
-v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
-v.purchasePrice = Number(v.purchasePrice)
-v.sellingPrice  = Number(v.sellingPrice)
-v.status = v.status || 'instock'
+      for (const v of data.variants) {
+        if (!v.colour?.trim()) return res.status(400).json({ message: 'Variant colour required' })
+        if (!v.size?.trim())   return res.status(400).json({ message: 'Variant size required' })
+
+          // ✅ Admin OR staff — purchasePrice optional (staff ku hide)
+v.purchasePrice = Number(v.purchasePrice || 0)
+
+        if (!v.sellingPrice || v.sellingPrice <= 0) {
+          return res.status(400).json({ message: 'Variant selling price required' })
         }
-
-        existing.variants.push(...data.variants)
-
-        // Update description if provided
-        if (data.description?.trim()) existing.description = data.description.trim()
-
-        await existing.save()
-
-        // Bump item_no counter
-        await GarmentCounter.findByIdAndUpdate(
-          `item_no_${existing.productCode}`,
-          { $max: { seq: nextNum - 1 } },
-          { upsert: true, setDefaultsOnInsert: true }
-        )
-
-        return res.status(200).json(existing)
-      }
-    }
-
-    // ---------- New product ----------
-if (!data.productCode?.trim()) {
-  // ✅ Auto-generate as S-series (default)
-  const stocks = await GarmentStock.find().select('productCode').lean()
-
-  let maxS = 0
-  stocks.forEach((s) => {
-    const code = (s.productCode || '').trim().toUpperCase()
-    const m = code.match(/^S(\d+)$/)
-    if (m) {
-      const n = parseInt(m[1], 10)
-      if (!isNaN(n) && n > maxS) maxS = n
-    }
-  })
-
-  const counterS = await GarmentCounter.findById('product_code_S')
-  const maxFromCounterS = counterS?.seq || 0
-
-  const nextNum = Math.max(maxS, maxFromCounterS) + 1
-  data.productCode = `S${padCode(nextNum)}`
-
-  await GarmentCounter.findByIdAndUpdate(
-    'product_code_S',
-    { $max: { seq: nextNum } },
-    { upsert: true, setDefaultsOnInsert: true }
-  )
-} else {
-  // ✅ User provided a code (S01 / M05 / T12 / 01 / …)
-  data.productCode = data.productCode.trim().toUpperCase()
-
-  // If it's S/M/T + number → bump that series counter
-  const seriesMatch = data.productCode.match(/^([SMT])(\d+)$/)
-  if (seriesMatch) {
-    const letter = seriesMatch[1]
-    const n = parseInt(seriesMatch[2], 10)
-    if (!isNaN(n)) {
-      await GarmentCounter.findByIdAndUpdate(
-        `product_code_${letter}`,
-        { $max: { seq: n } },
-        { upsert: true, setDefaultsOnInsert: true }
-      )
-    }
-  } else {
-    // Legacy numeric — keep numeric counter bumped for safety
-    const numPC = parseInt(data.productCode, 10)
-    if (!isNaN(numPC)) {
-      await GarmentCounter.findByIdAndUpdate(
-        'product_code',
-        { $max: { seq: numPC } },
-        { upsert: true, setDefaultsOnInsert: true }
-      )
-    }
-  }
+// ✅ Only validate if purchasePrice > 0 (staff ku 0, so skip)
+if (Number(v.purchasePrice) > 0 && Number(v.sellingPrice) < Number(v.purchasePrice)) {
+  return res.status(400).json({ message: 'Selling price cannot be less than purchase price' })
 }
 
-    // Validate + auto itemNo
+        v.itemNo = padCode(nextNum)
+        nextNum += 1
+        v.description = v.description?.trim() || ''
+        v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
+        v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
+        v.purchasePrice = Number(v.purchasePrice)
+        v.sellingPrice  = Number(v.sellingPrice)
+        v.quantity      = Math.max(1, Number(v.quantity || 1))
+        v.soldQty       = 0   // ✅ NEW
+        v.reservedQty   = 0
+        v.status        = v.quantity > 0 ? 'instock' : 'sold'
+      }
+
+      existing.variants.push(...data.variants)
+      if (data.description?.trim()) existing.description = data.description.trim()
+      await existing.save()
+
+      await GarmentCounter.findByIdAndUpdate(
+        `item_no_${pc}`,
+        { $max: { seq: nextNum - 1 } },
+        { upsert: true, setDefaultsOnInsert: true }
+      )
+
+      return res.status(200).json(existing)
+    }
+
+    // ✅ New product — validate + assign itemNos
     let nextItemNum = 1
     for (const v of data.variants) {
       if (!v.colour?.trim()) return res.status(400).json({ message: 'Variant colour required' })
       if (!v.size?.trim())   return res.status(400).json({ message: 'Variant size required' })
-      if (!v.purchasePrice || v.purchasePrice <= 0) {
-        return res.status(400).json({ message: 'Variant purchase price required' })
-      }
+
+      // ✅ Admin OR staff — purchasePrice optional (staff ku hide)
+      v.purchasePrice = Number(v.purchasePrice || 0)
+
       if (!v.sellingPrice || v.sellingPrice <= 0) {
         return res.status(400).json({ message: 'Variant selling price required' })
       }
-      if (Number(v.sellingPrice) < Number(v.purchasePrice)) {
+      // ✅ Only validate if purchasePrice > 0 (staff ku 0, so skip)
+      if (Number(v.purchasePrice) > 0 && Number(v.sellingPrice) < Number(v.purchasePrice)) {
         return res.status(400).json({ message: 'Selling price cannot be less than purchase price' })
       }
-v.itemNo = padCode(nextItemNum)
-nextItemNum += 1
-v.description = v.description?.trim() || ''
-v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
-v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
-v.purchasePrice = Number(v.purchasePrice)
-v.sellingPrice  = Number(v.sellingPrice)
-v.status = v.status || 'instock'
+
+      v.itemNo = padCode(nextItemNum)
+      nextItemNum += 1
+      v.description = v.description?.trim() || ''
+      v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
+      v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
+      v.sellingPrice  = Number(v.sellingPrice)
+      v.quantity      = Math.max(1, Number(v.quantity || 1))
+      v.soldQty       = 0   // ✅ NEW
+      v.reservedQty   = 0
+      v.status        = v.quantity > 0 ? 'instock' : 'sold'
     }
 
     await GarmentCounter.findByIdAndUpdate(
-      `item_no_${data.productCode}`,
+      `item_no_${pc}`,
       { $max: { seq: nextItemNum - 1 } },
       { upsert: true, setDefaultsOnInsert: true }
     )
 
-    // Seller protection (silently strip if admin)
+    // Seller protection — admin can also enter seller details
     const canSeeSeller = ['md', 'md_finance', 'ceo'].includes(req.user?.role)
-    if (!canSeeSeller) {
+    const isAdmin = req.user?.role === 'admin'
+
+    if (!canSeeSeller && !isAdmin) {
       delete data.sellerName
       delete data.sellerMobile
       delete data.sellerAddress
@@ -852,8 +1012,7 @@ v.status = v.status || 'instock'
 })
 
 // ============================================================
-// STOCK — UPDATE
-// productCode immutable
+// STOCK — UPDATE (quantity, status sync, append new variants)
 // ============================================================
 router.put('/stock/:id', protect, async (req, res) => {
   try {
@@ -870,7 +1029,9 @@ router.put('/stock/:id', protect, async (req, res) => {
     if (!existingStock) return res.status(404).json({ message: 'Stock not found' })
 
     const canSeeSeller = ['md', 'md_finance', 'ceo'].includes(req.user?.role)
-    if (!canSeeSeller) {
+    const isAdmin = req.user?.role === 'admin'
+
+    if (!canSeeSeller && !isAdmin) {
       delete data.sellerName
       delete data.sellerMobile
       delete data.sellerAddress
@@ -891,8 +1052,6 @@ router.put('/stock/:id', protect, async (req, res) => {
       let nextNum = maxNum + 1
 
 for (const v of data.variants) {
-  // If variant has existing itemNo → keep it
-  // If no itemNo → assign new
   if (!v.itemNo?.trim()) {
     v.itemNo = padCode(nextNum)
     nextNum += 1
@@ -903,7 +1062,18 @@ for (const v of data.variants) {
   v.description = v.description?.trim() || ''
   v.purchaseYear  = v.purchaseYear  ? Number(v.purchaseYear)  : null
   v.purchaseMonth = v.purchaseMonth ? Number(v.purchaseMonth) : null
-  v.purchasePrice = Number(v.purchasePrice || 0)
+
+  const existing = existingStock.variants.find(sv => sv.itemNo === v.itemNo)
+
+  if (isAdmin) {
+    v.purchasePrice = existing?.purchasePrice || 0
+  } else {
+    v.purchasePrice = existing?.purchasePrice ?? Number(v.purchasePrice || 0)
+  }
+
+  // ✅ Preserve soldQty from existing variant
+  v.soldQty = Number(existing?.soldQty || 0)
+
   v.sellingPrice  = Number(v.sellingPrice || 0)
   v.status = v.status || 'instock'
 }
@@ -930,17 +1100,57 @@ for (const v of data.variants) {
   }
 })
 
-
-
 // ============================================================
-// STOCK — DELETE
+// STOCK — DELETE (full product)
 // ============================================================
 router.delete('/stock/:id', protect, async (req, res) => {
   try {
+    // ✅ Only MD/CEO/MD_finance can delete
+    const canDelete = ['md', 'md_finance', 'ceo'].includes(req.user?.role)
+    if (!canDelete) {
+      return res.status(403).json({ message: 'Not allowed to delete stock' })
+    }
+
     const stock = await GarmentStock.findByIdAndDelete(req.params.id)
     if (!stock) return res.status(404).json({ message: 'Stock not found' })
     res.json({ message: 'Deleted' })
   } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+// ============================================================
+// ✅ STOCK — DELETE SINGLE VARIANT
+// ============================================================
+router.delete('/stock/:id/variant/:itemNo', protect, async (req, res) => {
+  try {
+    // ✅ Only MD/CEO/MD_finance can delete
+    const canDelete = ['md', 'md_finance', 'ceo'].includes(req.user?.role)
+    if (!canDelete) {
+      return res.status(403).json({ message: 'Not allowed to delete variant' })
+    }
+
+    const { id, itemNo } = req.params
+
+    const stock = await GarmentStock.findById(id)
+    if (!stock) return res.status(404).json({ message: 'Stock not found' })
+
+    const variant = stock.variants.find((v) => v.itemNo === itemNo)
+    if (!variant) return res.status(404).json({ message: 'Variant not found' })
+
+    // ✅ If it's the last variant, delete entire stock
+    if (stock.variants.length === 1) {
+      await GarmentStock.findByIdAndDelete(id)
+      return res.json({ message: 'Product deleted (last variant)' })
+    }
+
+    // ✅ Remove variant
+    stock.variants = stock.variants.filter((v) => v.itemNo !== itemNo)
+    await stock.save()
+
+    res.json(stock)
+  } catch (err) {
+    console.error('❌ DELETE variant error:', err.message)
     res.status(500).json({ message: err.message })
   }
 })

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose'
 
 // ============================================================
-// 1. GARMENT BILL MODEL (Multi-item, no qty, stock status)
+// 1. GARMENT BILL MODEL
 // ============================================================
 const garmentBillItemSchema = new mongoose.Schema(
   {
@@ -12,7 +12,8 @@ const garmentBillItemSchema = new mongoose.Schema(
     size:        { type: String, default: '' },
     colour:      { type: String, default: '' },
     rate:        { type: Number, required: true, min: 0 },
-    amount:      { type: Number, required: true, min: 0 },     // rate × 1 (each item = 1 piece)
+    qty:         { type: Number, required: true, min: 1, default: 1 }, // ✅ NEW
+    amount:      { type: Number, required: true, min: 0 },             // rate × qty
   },
   { _id: false }
 )
@@ -25,7 +26,6 @@ const garmentBillSchema = new mongoose.Schema(
       required: true,
       unique: true,
       index: true,
-      // Format: YYYYMM + FIRST_ITEM_CODE + 3-digit-seq
     },
 
     // ============ Customer Info ============
@@ -34,7 +34,6 @@ const garmentBillSchema = new mongoose.Schema(
       required: true,
       trim: true,
       index: true,
-      // Format: G01, G02, ..., G99, G100
     },
     customerName:   { type: String, required: true, trim: true },
     customerMobile: {
@@ -44,7 +43,7 @@ const garmentBillSchema = new mongoose.Schema(
     },
     loyaltyPoints: { type: Number, default: 0, min: 0 },
 
-    // ============ Multi-Item Cart (each = 1 piece) ============
+    // ============ Multi-Item Cart ============
     items: {
       type: [garmentBillItemSchema],
       validate: {
@@ -54,10 +53,12 @@ const garmentBillSchema = new mongoose.Schema(
     },
 
     // ============ Amount ============
-    subTotal:        { type: Number, default: 0, min: 0 },   // ✅ ADD
-    shippingAmount:  { type: Number, default: 0, min: 0 },   // ✅ ADD
-    totalAmount: { type: Number, required: true, min: 0 },
-    totalItems:  { type: Number, required: true, min: 1 },
+    subTotal:        { type: Number, default: 0, min: 0 },
+    shippingAmount:  { type: Number, default: 0, min: 0 },
+    discountAmount:  { type: Number, default: 0, min: 0 },
+    totalAmount:     { type: Number, required: true, min: 0 },
+    totalItems:      { type: Number, required: true, min: 1 },
+    totalQty:        { type: Number, default: 0, min: 0 },   // ✅ NEW — sum of item.qty
 
     // ============ Payment ============
     paymentMode: {
@@ -85,23 +86,39 @@ export const GarmentBill = mongoose.model('GarmentBill', garmentBillSchema)
 
 
 // ============================================================
-// 2. GARMENT STOCK MODEL (no quantity, has status per variant)
+// 2. GARMENT STOCK MODEL
 // ============================================================
 const garmentStockVariantSchema = new mongoose.Schema(
   {
     itemNo: { type: String, required: true },       // 01, 02, ..., 99, 100
+
     colour: { type: String, required: true },
     size:   { type: String, required: true },
 
-    // ✅ NEW — optional description for the variant
     description: { type: String, default: '' },
 
-    // ✅ NEW — purchase year & month
     purchaseYear:  { type: Number, default: null, min: 2000, max: 2100 },
     purchaseMonth: { type: Number, default: null, min: 1, max: 12 },
 
     purchasePrice: { type: Number, required: true, min: 0 },
     sellingPrice:  { type: Number, required: true, min: 0 },
+
+    // ✅ Current quantity in stock
+    //   - stock add: initial quantity
+    //   - bill save: decrement by qty
+    //   - bill delete: increment by qty
+    quantity: { type: Number, default: 1, min: 0 },
+
+    // ✅ Total sold count
+    //   - bill save: increment by qty
+    //   - bill edit/delete: decrement by qty
+    soldQty: { type: Number, default: 0, min: 0 },
+
+    // ✅ Reserved count (if cart-reserve system used)
+    //   - set to 0 if reserve system not used
+    reservedQty: { type: Number, default: 0, min: 0 },
+
+    // ✅ Status — auto-managed by quantity
     status: {
       type: String,
       enum: ['instock', 'sold', 'return', 'exchange'],
@@ -130,7 +147,7 @@ const garmentStockSchema = new mongoose.Schema(
       },
     },
 
-    // Confidential (CEO/MD/MD_Finance fills)
+    // Confidential (CEO/MD/MD_Finance only)
     sellerName:    { type: String, default: '' },
     sellerMobile:  { type: String, default: '' },
     sellerAddress: { type: String, default: '' },
@@ -152,7 +169,7 @@ export const GarmentStock = mongoose.model('GarmentStock', garmentStockSchema)
 // ============================================================
 const garmentCounterSchema = new mongoose.Schema(
   {
-    _id: { type: String, required: true }, // 'customer_no', 'product_code', 'item_no_01'
+    _id: { type: String, required: true }, // 'item_no_<productCode>'
     seq: { type: Number, default: 0 },
   },
   { timestamps: true }
