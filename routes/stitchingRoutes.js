@@ -459,8 +459,13 @@ router.get('/reports', protect, async (req, res) => {
       return res.status(403).json({ message: 'Reports not available for admin' })
     }
 
-    const { from, to } = req.query
+    const { from, to, unitNo } = req.query
     const matchStage = {}
+
+    // ✅ NEW: unit filter (empty = all units)
+    if (unitNo && unitNo.trim()) {
+      matchStage.unitNo = unitNo.trim()
+    }
 
     if (from || to) {
       matchStage.createdAt = {}
