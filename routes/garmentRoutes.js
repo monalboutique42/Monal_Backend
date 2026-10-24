@@ -604,7 +604,7 @@ router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res)
     const { stockId, itemNo } = req.params
     const { status } = req.body
 
-    if (!['instock', 'sold', 'return', 'exchange'].includes(status)) {
+    if (!['instock', 'sold'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' })
     }
 
@@ -614,15 +614,7 @@ router.patch('/stock/:stockId/variant/:itemNo/status', protect, async (req, res)
     const variant = stock.variants.find((v) => v.itemNo === itemNo)
     if (!variant) return res.status(404).json({ message: 'Variant not found' })
 
-    const oldStatus = variant.status
     variant.status = status
-
-    // ✅ Return → auto-increment quantity
-    if (status === 'return' && oldStatus !== 'return') {
-      variant.quantity = Number(variant.quantity || 0) + 1
-    }
-
-    // ✅ Manual override → don't auto-sync (user wants this status)
     await stock.save()
 
     res.json(stock)
@@ -646,13 +638,12 @@ router.get('/reports', protect, async (req, res) => {
     if (from || to) {
       matchStage.createdAt = {}
       if (from) {
-        const start = new Date(from)
-        start.setHours(0, 0, 0, 0)
+        // ✅ Use UTC-adjusted local start (India = +05:30)
+        const start = new Date(`${from}T00:00:00+05:30`)
         matchStage.createdAt.$gte = start
       }
       if (to) {
-        const end = new Date(to)
-        end.setHours(23, 59, 59, 999)
+        const end = new Date(`${to}T23:59:59.999+05:30`)
         matchStage.createdAt.$lte = end
       }
     }
@@ -713,7 +704,7 @@ router.get('/reports', protect, async (req, res) => {
             profit: 0,
           }
         }
-        productStats[it.productCode].qty += 1
+        productStats[it.productCode].qty += Number(it.qty || 1)
         productStats[it.productCode].revenue += revenue
         productStats[it.productCode].profit += profit
       })
@@ -723,9 +714,25 @@ router.get('/reports', protect, async (req, res) => {
       ? ((totalProfit / summary.totalRevenue) * 100).toFixed(1)
       : 0
 
+    // ✅ Add ALL products with 0 qty if not sold
+    const allProductCodes = await GarmentStock.find().distinct('productCode')
+    allProductCodes.forEach((pc) => {
+      if (!productStats[pc]) {
+        productStats[pc] = {
+          productCode: pc,
+          description: '',
+          qty: 0,
+          revenue: 0,
+          profit: 0,
+        }
+      }
+    })
+
     const topProducts = Object.values(productStats)
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, 10)
+      .sort((a, b) => {
+        if (b.qty !== a.qty) return b.qty - a.qty
+        return a.productCode.localeCompare(b.productCode)
+      })
 
     const paymentAgg = await GarmentBill.aggregate([
       { $match: matchStage },
@@ -765,24 +772,103 @@ router.get('/reports', protect, async (req, res) => {
       totalAmount: c.totalAmount,
     }))
 
+    // ✅ Detect grouping type from date range
+    let groupType = 'daily'      // default
+    let groupFormat = '%Y-%m-%d'
+    let dateLabelFn = null
+
+    if (from && to) {
+      const start = new Date(from); start.setHours(0, 0, 0, 0)
+      const end = new Date(to); end.setHours(23, 59, 59, 999)
+      const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24))
+
+      if (daysDiff <= 1) {
+        groupType = 'hourly'
+        groupFormat = '%Y-%m-%d %H:00'
+      } else if (daysDiff <= 7) {
+        groupType = 'daily'
+        groupFormat = '%Y-%m-%d'
+      } else if (daysDiff <= 60) {
+        groupType = 'daily'
+        groupFormat = '%Y-%m-%d'
+      } else {
+        groupType = 'monthly'
+        groupFormat = '%Y-%m'
+      }
+    }
+
     const trendAgg = await GarmentBill.aggregate([
       { $match: matchStage },
       {
         $group: {
           _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+            $dateToString: {
+              format: groupFormat,
+              date: '$createdAt',
+              timezone: 'Asia/Kolkata',   // ✅ IST buckets
+            },
           },
-          count: { $sum: 1 },
+                    count: { $sum: 1 },
           revenue: { $sum: '$totalAmount' },
         },
       },
       { $sort: { _id: 1 } },
     ])
-    const dailyTrend = trendAgg.map((d) => ({
-      date: d._id,
-      count: d.count,
-      revenue: d.revenue,
-    }))
+
+    // ✅ Build full timeline (missing days/hours = 0)
+    let dailyTrend = []
+
+    if (groupType === 'hourly') {
+      // 24-hour buckets for the selected day
+      const dayStr = from || (() => {
+        const d = new Date()
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      })()
+      const map = {}
+      trendAgg.forEach((d) => { map[d._id] = d })
+
+      for (let h = 0; h < 24; h++) {
+        const hh = String(h).padStart(2, '0')
+        const key = `${dayStr} ${hh}:00`
+        const found = map[key]
+        dailyTrend.push({
+          date: `${hh}:00`,
+          count: found?.count || 0,
+          revenue: found?.revenue || 0,
+        })
+      }
+    } else if (groupType === 'daily' && from && to) {
+      // Fill every date in range with 0 if no bills
+      const map = {}
+      trendAgg.forEach((d) => { map[d._id] = d })
+
+      // ✅ Parse from/to as local (IST)
+      const [fy, fm, fd] = from.split('-').map(Number)
+      const [ty, tm, td] = to.split('-').map(Number)
+      const cursor = new Date(fy, fm - 1, fd)
+      const end = new Date(ty, tm - 1, td)
+
+      while (cursor <= end) {
+        const yyyy = cursor.getFullYear()
+        const mm = String(cursor.getMonth() + 1).padStart(2, '0')
+        const dd = String(cursor.getDate()).padStart(2, '0')
+        const key = `${yyyy}-${mm}-${dd}`
+        const found = map[key]
+        dailyTrend.push({
+          date: `${dd}/${mm}`,
+          count: found?.count || 0,
+          revenue: found?.revenue || 0,
+        })
+        cursor.setDate(cursor.getDate() + 1)
+      }
+    } else {
+      // monthly — raw aggregate
+      dailyTrend = trendAgg.map((d) => ({
+        date: d._id,
+        count: d.count,
+        revenue: d.revenue,
+      }))
+    }
 
     res.json({
       summary: {

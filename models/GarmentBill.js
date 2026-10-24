@@ -121,7 +121,7 @@ const garmentStockVariantSchema = new mongoose.Schema(
     // ✅ Status — auto-managed by quantity
     status: {
       type: String,
-      enum: ['instock', 'sold', 'return', 'exchange'],
+      enum: ['instock', 'sold'],
       default: 'instock',
     },
   },
