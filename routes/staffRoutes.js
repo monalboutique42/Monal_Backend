@@ -124,7 +124,7 @@ router.post('/', protect, requireRole('md', 'md_finance'), async (req, res) => {
 // ============================================================
 router.put('/:id', protect, requireRole('md', 'md_finance'), async (req, res) => {
   try {
-    const { name, role, unitNo, active, password, oldPassword, resetPassword } = req.body
+    const { name, email, role, unitNo, active, password, oldPassword, resetPassword } = req.body
 
     const target = await User.findById(req.params.id)
     if (!target) return res.status(404).json({ message: 'Staff not found' })
@@ -135,6 +135,17 @@ router.put('/:id', protect, requireRole('md', 'md_finance'), async (req, res) =>
 
     const update = {}
     if (name !== undefined) update.name = name
+    if (email !== undefined) {
+      const cleanEmail = email.toLowerCase().trim()
+      
+      // ✅ Check if new email already exists in another account
+      const emailExists = await User.findOne({ email: cleanEmail, _id: { $ne: req.params.id } })
+      if (emailExists) {
+        return res.status(400).json({ message: 'Email already in use by another staff' })
+      }
+      
+      update.email = cleanEmail
+    }
     if (role !== undefined) update.role = role
     if (unitNo !== undefined) update.unitNo = unitNo
     if (active !== undefined) update.active = active
