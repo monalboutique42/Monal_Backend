@@ -24,9 +24,9 @@ const APP_ACCESS = {
 // Max sessions per role per app
 // ============================================================
 const SESSION_LIMIT = {
-  admin:      { billing: 2, admin: 0 },   // staff: 2 billing, 0 admin
+  admin:      { billing: 1, admin: 0 },   
   md_finance: { billing: 1, admin: 1 },
-  md:         { billing: 1, admin: 1 },
+  md:         { billing: 2, admin: 2 },
   ceo:        { billing: 1, admin: 1 },
 }
 
@@ -73,8 +73,13 @@ router.post('/login', async (req, res) => {
       })
     }
 
-    const existing = await ActiveSession.find({ userId: user._id, app })
-      .sort({ createdAt: 1 })   // oldest first
+    // ✅ Find all sessions for THIS USER (specific user account) 
+    // Adhanaala Unit 1, Unit 2, Unit 3 (separate users) orutharai oruthar kick panna maatanga.
+    // Same user (e.g. MD) 2 device la login panna, andha specific user-oda session mattum kick aagum.
+    const existing = await ActiveSession.find({
+      userId: user._id,
+      app
+    }).sort({ createdAt: 1 })
 
     if (existing.length >= limit) {
       // ✅ Kick oldest sessions until under limit
