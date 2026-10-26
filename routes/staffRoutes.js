@@ -35,6 +35,9 @@ async function ensureUnitUsers() {
   }
 }
 
+
+
+
 // ============================================================
 // GET /staff — List all
 // ============================================================
@@ -42,13 +45,25 @@ router.get('/', protect, async (req, res) => {
   try {
     await ensureUnitUsers()
 
-    const filter = {}
+    // ✅ Visibility rules:
+    //    - Super Admin → sees EVERYTHING (all staff + all super admins + self)
+    //    - MD / MD Finance / CEO → sees all staff, but NO super admins
+    //    - Admin (unit user) → sees own unit + MD-level roles, NO super admins
+    let filter
 
-    if (req.user.role === 'admin') {
-      filter.$or = [
-        { unitNo: req.user.unitNo },
-        { role: { $in: ['md', 'md_finance', 'ceo'] } },
-      ]
+    if (req.user.isSuperAdmin) {
+      // ✅ Super admin sees full staff list including themselves + any other super admins
+      filter = {}
+    } else {
+      // ✅ Everyone else: hide super admins
+      filter = { isSuperAdmin: { $ne: true } }
+
+      if (req.user.role === 'admin') {
+        filter.$or = [
+          { unitNo: req.user.unitNo },
+          { role: { $in: ['md', 'md_finance', 'ceo'] } },
+        ]
+      }
     }
 
     const staff = await User.find(filter)
@@ -87,6 +102,11 @@ router.get('/unit/:unitNo', protect, async (req, res) => {
 router.post('/', protect, requireRole('md', 'md_finance'), async (req, res) => {
   try {
     const { name, email, password, role, unitNo } = req.body
+
+    // ✅ Block creating super admins via API (seed-only)
+    if (req.body.isSuperAdmin) {
+      return res.status(403).json({ message: '🔒 Cannot create Super Admin via API' })
+    }
 
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password required' })
@@ -128,6 +148,14 @@ router.put('/:id', protect, requireRole('md', 'md_finance'), async (req, res) =>
 
     const target = await User.findById(req.params.id)
     if (!target) return res.status(404).json({ message: 'Staff not found' })
+
+    // ✅ Super Admin protection:
+    //    - No one else can modify a Super Admin account
+    //    - A Super Admin CAN modify themselves (name / email / password)
+    const isSelf = req.user._id.toString() === req.params.id
+    if (target.isSuperAdmin && !(req.user.isSuperAdmin && isSelf)) {
+      return res.status(403).json({ message: '🔒 Super Admin account cannot be modified' })
+    }
 
     if (target.isSuperMD && role && role !== 'md') {
       return res.status(403).json({ message: 'Cannot change Super MD role' })
@@ -237,6 +265,11 @@ router.delete('/:id', protect, requireRole('md'), async (req, res) => {
 
     if (target.isSuperMD) {
       return res.status(403).json({ message: '🔒 Super MD account cannot be deleted' })
+    }
+
+    // ✅ Super Admin protection
+    if (target.isSuperAdmin) {
+      return res.status(403).json({ message: '🔒 Super Admin account cannot be deleted' })
     }
 
     // ✅ Unit user protection

@@ -22,6 +22,9 @@ const userSchema = new mongoose.Schema(
     // ✅ Super MD protection
     isSuperMD: { type: Boolean, default: false },
 
+    // ✅ Super Admin (developer-only, invisible to all staff)
+    isSuperAdmin: { type: Boolean, default: false },
+
     // ✅ Unit user flag (unit email + pass shared by staff)
     isUnitUser: { type: Boolean, default: false },
 

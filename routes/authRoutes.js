@@ -26,8 +26,10 @@ const APP_ACCESS = {
 const SESSION_LIMIT = {
   admin:      { billing: 1, admin: 0 },   
   md_finance: { billing: 1, admin: 1 },
-  md:         { billing: 2, admin: 2 },
+  md:         { billing: 1, admin: 1 },
   ceo:        { billing: 1, admin: 1 },
+  superadmin: { billing: 1, admin: 1 },   // ✅ dev account — generous limit
+
 }
 
 // ============================================================
@@ -66,7 +68,9 @@ router.post('/login', async (req, res) => {
     }
 
     // ---- Session limit
-    const limit = SESSION_LIMIT[user.role]?.[app] ?? 1
+    // ✅ Super admin gets its own higher limit (still full MD access)
+    const limitKey = user.isSuperAdmin ? 'superadmin' : user.role
+    const limit = SESSION_LIMIT[limitKey]?.[app] ?? 1
     if (limit <= 0) {
       return res.status(403).json({
         message: `Your role is not allowed to login to ${app}`,
@@ -109,6 +113,7 @@ router.post('/login', async (req, res) => {
       role: user.role,
       unitNo: user.unitNo,
       isSuperMD: user.isSuperMD,
+      isSuperAdmin: user.isSuperAdmin,    // ✅ NEW — needed by frontend
       isUnitUser: user.isUnitUser,
       app,
       token,
