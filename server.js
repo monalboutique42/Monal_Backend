@@ -11,6 +11,8 @@ const { default: authRoutes }     = await import('./routes/authRoutes.js')
 const { default: stitchingRoutes } = await import('./routes/stitchingRoutes.js')
 const { default: staffRoutes }    = await import('./routes/staffRoutes.js')
 const { default: garmentRoutes } = await import('./routes/garmentRoutes.js')
+const { default: whatsappRoutes } = await import('./routes/whatsapp.js')  // ✅ ADD THIS
+
 
 
 const app = express()
@@ -42,8 +44,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 
-app.use(express.json({ limit: '50mb' }))
-app.use(express.urlencoded({ extended: true, limit: '50mb' }))
+app.use(express.json({ limit: '100mb' }))
+app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 
 // ============================================================
 // ROUTES
@@ -51,7 +53,8 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 app.use('/staff',     staffRoutes)
 app.use('/auth',      authRoutes)
 app.use('/stitching', stitchingRoutes)
-app.use('/garment', garmentRoutes)   // ✅ ADD
+app.use('/garment', garmentRoutes)  
+app.use('/whatsapp',  whatsappRoutes)  
 
 
 // Health check
@@ -116,6 +119,7 @@ const connectWithRetry = async (retries = 5, delay = 5000) => {
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`)
       console.log(`🔗 Health check: http://localhost:${PORT}/health`)
+      console.log(`✅ WhatsApp Service Ready (Click Connect in UI to initialize)`)
     })
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message)
@@ -145,3 +149,8 @@ process.on('SIGINT', async () => {
     process.exit(1)
   }
 })
+
+process.on('uncaughtException', (err) => {
+  if (err.message.includes('detached Frame')) return; // ✅ Ignore Puppeteer restart bug
+  console.log('⚠️ Uncaught Exception:', err.message);
+});
