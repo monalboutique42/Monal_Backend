@@ -1,85 +1,155 @@
-import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth, MessageMedia } = pkg;
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion 
+} from '@whiskeysockets/baileys'
+import fs from 'fs'
+import path from 'path'
+import pino from 'pino'
 
-export const clients = {}; 
+// ============================================================
+// IN-MEMORY CLIENT REGISTRY
+// ============================================================
+export const clients = {}
 
-export const initWhatsApp = (unitId) => {
-  if (clients[unitId]) return clients[unitId];
+// ============================================================
+// SESSION STORAGE PATH
+// ============================================================
+const SESSION_BASE_PATH = path.join(process.cwd(), 'whatsapp-sessions')
 
-  const client = new Client({
-    authStrategy: new LocalAuth({ clientId: `monal-unit-${unitId}` }),
-    
-    // ✅ 1. THE MAIN TRICK: Lock WhatsApp Web version (No auto-updates)
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+// ✅ Ensure session base folder exists
+if (!fs.existsSync(SESSION_BASE_PATH)) {
+  fs.mkdirSync(SESSION_BASE_PATH, { recursive: true })
+}
+
+const logger = pino({ level: 'silent' })
+
+// ============================================================
+// INIT WHATSAPP CLIENT (per user) — Baileys
+// ============================================================
+export const initWhatsApp = async (userId, forceNew = false) => {
+  const uid = String(userId)
+
+  // ✅ Already initialized — return existing client (unless forceNew)
+  if (clients[uid] && !forceNew) return clients[uid]
+
+  console.log(`🚀 [${uid}] Initializing Baileys WhatsApp client...${forceNew ? ' (reconnect)' : ''}`)
+
+  const sessionPath = path.join(SESSION_BASE_PATH, `monal-user-${uid}`)
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath)
+const { version } = await fetchLatestWaWebVersion()
+
+  const sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    
-    // ✅ 2. Disable the problematic feature that causes the PDF crash
-    markChatReadOnMessageSend: false,
+    logger,
+    printQRInTerminal: false, // QR ஐ frontend இல் காட்டுகிறோம்
+    generateHighQualityLinkPreview: true,
+  })
 
-    puppeteer: {
-      headless: "new",
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      ],
-    },
-  });
+  // ============================================================
+  // SAVE CREDENTIALS (critical for session persistence)
+  // ============================================================
+  sock.ev.on('creds.update', saveCreds)
 
-  // ✅ 3. Safe send function (Bypass error)
-  const safeSendMessage = async (chatId, content, options = {}) => {
-    await new Promise(resolve => setTimeout(resolve, 1000)); // 1 sec delay
-    try {
-      return await client.sendMessage(chatId, content, { ...options, sendSeen: false });
-    } catch (err) {
-      if (err.message.includes('markedUnread')) {
-        const chat = await client.getChatById(chatId);
-        return await chat.sendMessage(content, options);
-      }
-      throw err;
+  // ============================================================
+  // CONNECTION UPDATE (QR / open / close)
+  // ============================================================
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update
+
+    if (qr) {
+      console.log(`📱 [${uid}] QR Code Ready`)
+      clients[uid + '_qr'] = qr
+      clients[uid + '_ready'] = false
     }
-  };
 
-  // Expose safeSendMessage so routes can use it
-  client.safeSend = safeSendMessage;
+if (connection === 'open') {
+  console.log(`✅ [${uid}] WhatsApp is READY!`)
+  clients[uid + '_ready'] = true
+  clients[uid + '_qr'] = null
 
-  client.on('qr', (qr) => {
-    console.log(`📱 [${unitId}] QR Code Ready`);
-    clients[unitId + '_qr'] = qr;
-  });
+  // ✅ Get connected number (with retry — sock.user may not be ready instantly)
+  const tryGetNumber = (attempts = 0) => {
+    const userJid = sock.user?.id
+    if (userJid) {
+      const phoneNumber = userJid.split(':')[0] || userJid.split('@')[0]
+      clients[uid + '_number'] = phoneNumber
+      console.log(`📞 [${uid}] Connected Number: ${phoneNumber}`)
+    } else if (attempts < 5) {
+      setTimeout(() => tryGetNumber(attempts + 1), 500)
+    } else {
+      console.log(`⚠️  [${uid}] Could not get number after retries`)
+    }
+  }
+  tryGetNumber()
+}
 
-  client.on('ready', () => {
-    console.log(`✅ [${unitId}] WhatsApp is READY!`);
-    clients[unitId + '_ready'] = true;
-    clients[unitId + '_qr'] = null;
-  });
+if (connection === 'close') {
+  const statusCode = lastDisconnect?.error?.output?.statusCode
+  const shouldReconnect = statusCode !== DisconnectReason.loggedOut
 
-  client.on('authenticated', () => {
-    console.log(`✅ [${unitId}] Authenticated!`);
-    clients[unitId + '_ready'] = true; 
-    clients[unitId + '_qr'] = null;
-  });
+  console.log(`⚠️  [${uid}] Connection closed. Reason: ${statusCode}, Reconnect: ${shouldReconnect}`)
+  clients[uid + '_ready'] = false
+  clients[uid + '_qr'] = null
 
-  client.on('auth_failure', (msg) => console.error(`❌ [${unitId}] Auth Failure:`, msg));
+  // ✅ CRITICAL: remove old dead socket first
+  delete clients[uid]
 
-  client.on('disconnected', async (reason) => {
-    console.log(`❌ [${unitId}] Disconnected:`, reason);
-    clients[unitId + '_ready'] = false;
-    
-    setTimeout(async () => {
-      try { await client.destroy(); } catch (err) {}
-    }, 2000);
+  if (shouldReconnect) {
+    setTimeout(() => {
+      console.log(`🔄 [${uid}] Attempting reconnect...`)
+      initWhatsApp(uid, true)   // ✅ forceNew = true → new socket
+    }, 3000)
+  }
+}
+  })
 
-    delete clients[unitId];
-    delete clients[unitId + '_ready'];
-    delete clients[unitId + '_qr'];
-  });
+  clients[uid] = sock
+  return sock
+}
 
-  client.initialize().catch(err => console.error(`❌ [${unitId}] Init error:`, err.message));
-  clients[unitId] = client;
-  return client;
-};
+// ============================================================
+// GET EXISTING CLIENT
+// ============================================================
+export const getClient = (userId) => {
+  const uid = String(userId)
+  return clients[uid] || null
+}
+
+// ============================================================
+// AUTO-RESTORE ALL SESSIONS ON BOOT
+// ============================================================
+export const restoreAllSessions = () => {
+  try {
+    if (!fs.existsSync(SESSION_BASE_PATH)) {
+      console.log('ℹ️  No WhatsApp sessions to restore')
+      return
+    }
+
+    const folders = fs.readdirSync(SESSION_BASE_PATH)
+    const userFolders = folders.filter((f) => f.startsWith('monal-user-'))
+
+    if (userFolders.length === 0) {
+      console.log('ℹ️  No WhatsApp sessions to restore')
+      return
+    }
+
+    console.log(`🔁 Restoring ${userFolders.length} WhatsApp session(s)...`)
+
+    for (const folder of userFolders) {
+      const userId = folder.replace('monal-user-', '')
+      if (userId) {
+        console.log(`🔁 Restoring session for user: ${userId}`)
+        initWhatsApp(userId)
+      }
+    }
+  } catch (err) {
+    console.error('❌ Session restore error:', err.message)
+  }
+}

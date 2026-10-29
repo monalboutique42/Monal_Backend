@@ -1,89 +1,159 @@
-import express from 'express';
-import pkg from 'whatsapp-web.js';
-const { MessageMedia } = pkg;
-import { clients, initWhatsApp } from '../utils/whatsapp.js';
-import { protect } from '../middleware/auth.js';
+import express from 'express'
+import multer from 'multer'
+import fs from 'fs'
+import path from 'path'
+import os from 'os'
+import { clients, initWhatsApp } from '../utils/whatsapp.js'
+import { protect } from '../middleware/auth.js'
 
-const router = express.Router();
+const router = express.Router()
 
-// ✅ 1. Connect (Initialize QR)
+// ============================================================
+// HELPER — get user's session id
+// ============================================================
+const getUserId = (user) => {
+  return user.unitNo || user._id.toString()
+}
+
+// ============================================================
+// MULTER — memory storage (file buffer in req.file)
+// ============================================================
+const upload = multer({ storage: multer.memoryStorage() })
+
+// ============================================================
+// 1. POST /connect — initialize QR
+// ============================================================
 router.post('/connect', protect, async (req, res) => {
   try {
-    const unitId = req.user.unitNo || req.user._id;
-    initWhatsApp(unitId);
-    res.json({ success: true, message: 'Initializing...' });
+    const userId = getUserId(req.user)
+    await initWhatsApp(userId)
+    res.json({ success: true, message: 'Initializing...' })
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Connect error:', err.message)
+    res.status(500).json({ error: err.message })
   }
-});
+})
 
-// ✅ 2. Poll for QR Code / Status
+// ============================================================
+// 2. GET /code — poll for QR or ready status
+// ============================================================
 router.get('/code', protect, (req, res) => {
-  const unitId = req.user.unitNo || req.user._id;
-  const qr = clients[unitId + '_qr'];
-  const isReady = clients[unitId + '_ready'];
+  const userId = getUserId(req.user)
+  const qr = clients[userId + '_qr']
+  const isReady = clients[userId + '_ready']
+  const number = clients[userId + '_number']
 
-  if (isReady) return res.json({ connected: true, unitId }); // ✅ unitId anuppu
-  res.json({ connected: false, qr }); 
-});
+  if (isReady) {
+    return res.json({ connected: true, number: number || 'Connected', userId })
+  }
 
-// ✅ 3. Check Status
+  res.json({
+    connected: false,
+    qr: qr || null,
+    reconnecting: !qr,
+  })
+})
+
+// ============================================================
+// 3. GET /status — check connection
+// ============================================================
 router.get('/status', protect, (req, res) => {
-  const unitId = req.user.unitNo || req.user._id;
-  const isReady = clients[unitId + '_ready'];
-  if (isReady) return res.json({ connected: true, number: 'Connected', unitId });
-  res.json({ connected: false });
-});
+  const userId = getUserId(req.user)
+  const isReady = clients[userId + '_ready']
+  const number = clients[userId + '_number']
 
-// ✅ 4. Logout / Remove Link
+  if (isReady) {
+    return res.json({ connected: true, number: number || 'Connected', userId })
+  }
+  res.json({ connected: false })
+})
+
+// ============================================================
+// 4. POST /logout — manual logout
+// ============================================================
 router.post('/logout', protect, async (req, res) => {
   try {
-    const unitId = req.user.unitNo || req.user._id;
-    const client = clients[unitId];
-    
-    if (client) {
-      try { await client.logout(); } catch (e) {}
-      try { await client.destroy(); } catch (e) {}
-      
-      delete clients[unitId];
-      delete clients[unitId + '_ready'];
-      delete clients[unitId + '_qr'];
+    const userId = getUserId(req.user)
+    const sock = clients[userId]
+
+    if (sock) {
+      try {
+        await sock.logout()
+      } catch (e) {
+        console.error('Logout error:', e.message)
+      }
+      delete clients[userId]
+      delete clients[userId + '_ready']
+      delete clients[userId + '_qr']
+      delete clients[userId + '_number']
     }
-    res.json({ success: true, message: 'Disconnected' });
+
+    res.json({ success: true, message: 'Disconnected' })
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message })
   }
-});
+})
 
-// ✅ 5. Send Message
-router.post('/send', protect, async (req, res) => {
-  const { number, message, pdfBase64, fileName, unitId } = req.body; 
-  
-  const targetUnitId = unitId || req.user.unitNo || req.user._id;
-  
-  const client = clients[targetUnitId];
-  const isReady = clients[targetUnitId + '_ready'];
+// ============================================================
+// 5. POST /send — text OR PDF (multipart)
+// ============================================================
+router.post('/send', protect, upload.single('pdfFile'), async (req, res) => {
+  const { number, message } = req.body
+  const pdfFile = req.file   // ✅ multer → Buffer in memory
 
-  if (!isReady || !client) {
-    return res.status(400).json({ error: `WhatsApp not connected for unit ${targetUnitId}` });
+  const userId = getUserId(req.user)
+  const sock = clients[userId]
+  const isReady = clients[userId + '_ready']
+
+  if (!isReady || !sock) {
+    return res.status(400).json({
+      error: `WhatsApp not connected for this user. Please connect first.`,
+    })
   }
 
   try {
-    const chatId = number.includes('@c.us') ? number : `91${number.replace(/\D/g, '')}@c.us`;
+    // ✅ Format JID for India
+    const jid = number.includes('@s.whatsapp.net')
+      ? number
+      : `91${number.replace(/\D/g, '')}@s.whatsapp.net`
 
-    if (pdfBase64 && fileName) {
-      // ✅ Use the safeSend function (disables sendSeen to prevent crash)
-      const media = new MessageMedia('application/pdf', pdfBase64, fileName);
-      await client.safeSend(chatId, media, { caption: message });
+    if (pdfFile) {
+      // ✅ Save buffer to temp file — then send as { url }
+      const safeName = pdfFile.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')
+      const tempPath = path.join(os.tmpdir(), `${Date.now()}-${safeName}`)
+      fs.writeFileSync(tempPath, pdfFile.buffer)
+
+      console.log(`📎 [${userId}] Sending PDF: ${safeName} (${pdfFile.buffer.length} bytes)`)
+
+      try {
+        await sock.sendMessage(
+          jid,
+          {
+            document: { url: tempPath },   // ✅ { url } — streams from disk
+            mimetype: 'application/pdf',
+            fileName: pdfFile.originalname,
+            caption: message,
+          },
+          {
+            mediaUploadTimeoutMs: 120000,  // ✅ 2 min for large files
+          }
+        )
+      } finally {
+        // ✅ Cleanup temp file
+        try { fs.unlinkSync(tempPath) } catch {}
+      }
+
+      console.log(`✅ [${userId}] PDF sent successfully`)
     } else {
-      await client.safeSend(chatId, message);
+      // ✅ Text only
+      await sock.sendMessage(jid, { text: message })
     }
 
-    res.json({ success: true });
+    res.json({ success: true })
   } catch (err) {
-    console.error('Send WhatsApp error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Send WhatsApp error:', err)
+    res.status(500).json({ error: err.message })
   }
-});
+})
 
-export default router;
+export default router

@@ -3,17 +3,16 @@ import mongoose from 'mongoose'
 import cors from 'cors'
 import dotenv from 'dotenv'
 
-// ✅ STEP 1: dotenv FIRST — before any routes import
+// ✅ STEP 1: dotenv FIRST
 dotenv.config()
 
-// ✅ STEP 2: Dynamic import — AFTER dotenv.config()
-const { default: authRoutes }     = await import('./routes/authRoutes.js')
+// ✅ STEP 2: Dynamic imports AFTER dotenv
+const { default: authRoutes } = await import('./routes/authRoutes.js')
 const { default: stitchingRoutes } = await import('./routes/stitchingRoutes.js')
-const { default: staffRoutes }    = await import('./routes/staffRoutes.js')
+const { default: staffRoutes } = await import('./routes/staffRoutes.js')
 const { default: garmentRoutes } = await import('./routes/garmentRoutes.js')
-const { default: whatsappRoutes } = await import('./routes/whatsapp.js')  // ✅ ADD THIS
-
-
+const { default: whatsappRoutes } = await import('./routes/whatsapp.js')
+const { restoreAllSessions } = await import('./utils/whatsapp.js')
 
 const app = express()
 
@@ -28,21 +27,22 @@ const allowedOrigins = [
   'https://monal-frontend.vercel.app',
 ]
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, Postman)
-    if (!origin) return callback(null, true)
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true)
-    } else {
-      console.warn('❌ Blocked by CORS:', origin)
-      callback(new Error('Not allowed by CORS'))
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}))
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true)
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true)
+      } else {
+        console.warn('❌ Blocked by CORS:', origin)
+        callback(new Error('Not allowed by CORS'))
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+)
 
 app.use(express.json({ limit: '100mb' }))
 app.use(express.urlencoded({ extended: true, limit: '100mb' }))
@@ -50,12 +50,11 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 // ============================================================
 // ROUTES
 // ============================================================
-app.use('/staff',     staffRoutes)
-app.use('/auth',      authRoutes)
+app.use('/staff', staffRoutes)
+app.use('/auth', authRoutes)
 app.use('/stitching', stitchingRoutes)
-app.use('/garment', garmentRoutes)  
-app.use('/whatsapp',  whatsappRoutes)  
-
+app.use('/garment', garmentRoutes)
+app.use('/whatsapp', whatsappRoutes)
 
 // Health check
 app.get('/', (req, res) => {
@@ -119,7 +118,11 @@ const connectWithRetry = async (retries = 5, delay = 5000) => {
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`)
       console.log(`🔗 Health check: http://localhost:${PORT}/health`)
-      console.log(`✅ WhatsApp Service Ready (Click Connect in UI to initialize)`)
+
+      // ✅ STEP 3: Restore WhatsApp sessions on boot
+      // This re-initializes all saved sessions — QR NOT needed
+      console.log('🔁 Restoring WhatsApp sessions...')
+      restoreAllSessions()
     })
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message)
@@ -141,16 +144,42 @@ connectWithRetry()
 // ============================================================
 process.on('SIGINT', async () => {
   try {
+    // ✅ Close all WhatsApp sockets gracefully (saves session)
+    const { clients } = await import('./utils/whatsapp.js')
+
+    for (const [key, sock] of Object.entries(clients)) {
+      // Skip state keys (_ready, _qr, _number)
+      if (key.includes('_')) continue
+
+      if (sock) {
+        try {
+          console.log(`🔌 Closing WhatsApp socket: ${key}`)
+
+          // ✅ Baileys socket — try end() first, then logout() as fallback
+          if (typeof sock.end === 'function') {
+            await sock.end(undefined)          // graceful close, session preserved
+          } else if (typeof sock.logout === 'function') {
+            await sock.logout()                // full logout (deletes session)
+          } else if (typeof sock.destroy === 'function') {
+            await sock.destroy()               // fallback (shouldn't happen)
+          }
+        } catch (e) {
+          console.error(`Close error for ${key}:`, e.message)
+        }
+      }
+    }
+
     await mongoose.connection.close()
     console.log('✅ MongoDB connection closed')
+    console.log('✅ WhatsApp sockets closed')
     process.exit(0)
   } catch (err) {
-    console.error('❌ Error closing MongoDB:', err)
+    console.error('❌ Error during shutdown:', err)
     process.exit(1)
   }
 })
 
 process.on('uncaughtException', (err) => {
-  if (err.message.includes('detached Frame')) return; // ✅ Ignore Puppeteer restart bug
-  console.log('⚠️ Uncaught Exception:', err.message);
-});
+  if (err.message.includes('detached Frame')) return // Ignore Puppeteer restart bug
+  console.log('⚠️ Uncaught Exception:', err.message)
+})
