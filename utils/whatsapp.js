@@ -102,10 +102,22 @@ if (connection === 'close') {
   delete clients[uid]
 
   if (shouldReconnect) {
+    // ✅ 440 = connectionReplaced (another device took over this session)
+    //    Immediate reconnect causes conflict loop → wait longer
+    let delay = 3000
+    if (statusCode === 440) {
+      delay = 30000   // 30 seconds — let old session fully close
+      console.log(`⚠️  [${uid}] Session replaced (440) — waiting 30s before reconnect to avoid conflict loop`)
+    } else if (statusCode === 515) {
+      delay = 5000    // 5 seconds — restart required (after QR scan)
+    } else if (statusCode === 428) {
+      delay = 10000   // 10 seconds — connection closed by server
+    }
+
     setTimeout(() => {
-      console.log(`🔄 [${uid}] Attempting reconnect...`)
-      initWhatsApp(uid, true)   // ✅ forceNew = true → new socket
-    }, 3000)
+      console.log(`🔄 [${uid}] Attempting reconnect... (after ${delay / 1000}s)`)
+      initWhatsApp(uid, true)
+    }, delay)
   }
 }
   })
