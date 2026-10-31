@@ -55,7 +55,7 @@ router.get('/code', protect, (req, res) => {
 })
 
 // ============================================================
-// 3. GET /status — check connection
+// 3. GET /status — check connection (current user)
 // ============================================================
 router.get('/status', protect, (req, res) => {
   const userId = getUserId(req.user)
@@ -66,6 +66,53 @@ router.get('/status', protect, (req, res) => {
     return res.json({ connected: true, number: number || 'Connected', userId })
   }
   res.json({ connected: false })
+})
+
+// ============================================================
+// 3b. GET /status/all — all users' WhatsApp status (Staffs page)
+// ✅ Only MD / MD Finance can view
+// ============================================================
+router.get('/status/all', protect, async (req, res) => {
+  try {
+    // ✅ Only MD / MD Finance / Super Admin can view all statuses
+    const isAllowed =
+      ['md', 'md_finance'].includes(req.user.role) ||
+      req.user.isSuperAdmin === true
+
+    if (!isAllowed) {
+      return res.status(403).json({ message: 'Access denied' })
+    }
+
+    const User = (await import('../models/User.js')).default
+
+    // Get all staff (excluding super admins)
+    const staff = await User.find({
+      isSuperAdmin: { $ne: true },
+    }).select('_id name email role unitNo').lean()
+
+    // Build result with WhatsApp status per user
+    const result = staff.map((u) => {
+      const userId = u.unitNo || u._id.toString()
+      const isReady = clients[userId + '_ready']
+      const number = clients[userId + '_number']
+
+      return {
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        unitNo: u.unitNo,
+        whatsapp: isReady
+          ? { connected: true, number: number || 'Connected' }
+          : { connected: false, number: null },
+      }
+    })
+
+    res.json(result)
+  } catch (err) {
+    console.error('GET /status/all error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // ============================================================
@@ -155,5 +202,7 @@ router.post('/send', protect, upload.single('pdfFile'), async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+
+
 
 export default router
