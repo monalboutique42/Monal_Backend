@@ -23,8 +23,8 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
-  'https://monal-admin-pied.vercel.app',
-  'https://monal-frontend.vercel.app',
+  'https://monal-boutique-billing.vercel.app',
+  'https://monal-boutique-admin.vercel.app',
 ]
 
 app.use(
