@@ -38,24 +38,75 @@ const syncVariantStatus = (variant) => {
 // ============================================================
 // Generate Garment Bill No
 // ============================================================
-async function generateGarmentBillNo(firstItemCode) {
+// ✅ Detect bill format
+// Old format: YYYYMM + letters + digits   e.g. 202610BRINZ0102
+// New format: YYYYMM + 5 digits            e.g. 20261110003
+const OLD_FORMAT_RE = /^\d{6}[A-Z]+\d+$/i
+const NEW_FORMAT_RE = /^\d{11}$/
+
+// ✅ Parse old-format bill counter (item code aware)
+// 202610BRINZ0102  +  itemCode=BRINZ01  →  strip YYYYMM, strip itemCode → "02" → 2
+function parseOldBillCounter(billNo, itemCode) {
+  if (!billNo) return 0
+  let rest = billNo.slice(6)   // strip YYYYMM
+  if (itemCode && rest.toUpperCase().startsWith(String(itemCode).toUpperCase())) {
+    rest = rest.slice(String(itemCode).length)
+  }
+  const digits = rest.replace(/\D/g, '')
+  const n = parseInt(digits, 10)
+  return isNaN(n) ? 0 : n
+}
+
+// ✅ NEW billNo generator
+async function generateGarmentBillNo() {
   const now = new Date()
   const year  = now.getFullYear().toString()
   const month = (now.getMonth() + 1).toString().padStart(2, '0')
-  const prefix = `${year}${month}${firstItemCode}`
+  const prefix = `${year}${month}`   // e.g. "202611"
 
-  const lastBill = await GarmentBill
-    .findOne({ billNo: { $regex: `^${prefix}` } })
-    .sort({ billNo: -1 })
+  // ---------- 1) Count old-format bills (bridge) ----------
+  const oldBills = await GarmentBill
+    .find({ billNo: OLD_FORMAT_RE })
+    .select('billNo items')
+    .lean()
 
-  let nextSeq = 1
-  if (lastBill) {
-    const lastSeq = parseInt(lastBill.billNo.slice(prefix.length), 10)
-    if (!isNaN(lastSeq)) nextSeq = lastSeq + 1
+  // Use highest old counter (not count — so deletions don't lower the bridge)
+  let highestOldCounter = 0
+  for (const b of oldBills) {
+    const itemCode = b.items?.[0]?.itemCode || ''
+    const c = parseOldBillCounter(b.billNo, itemCode)
+    if (c > highestOldCounter) highestOldCounter = c
+  }
+  // If old counters are small (01, 02) but count is higher, use count
+  // (handles case where old counter format was broken)
+  const oldBridge = Math.max(highestOldCounter, oldBills.length)
+
+  // ---------- 2) Find highest new-format counter (all months) ----------
+  const newBills = await GarmentBill
+    .find({ billNo: NEW_FORMAT_RE })
+    .select('billNo')
+    .lean()
+
+  let highestNewCounter = 0
+  for (const b of newBills) {
+    const seq = parseInt(b.billNo.slice(6), 10)   // skip YYYYMM
+    if (!isNaN(seq) && seq > highestNewCounter) highestNewCounter = seq
   }
 
-  const seqStr = nextSeq <= 99 ? String(nextSeq).padStart(2, '0') : String(nextSeq)
-  return `${prefix}${seqStr}`
+  // ---------- 3) Compute next sequence ----------
+  let nextSeq
+  if (highestNewCounter > 0) {
+    // New-format bills exist → continue from them (delete-safe for new bills)
+    nextSeq = highestNewCounter + 1
+  } else {
+    // First ever new-format bill → bridge from old bills
+    nextSeq = 10001 + oldBridge   // 2 old → 10003 ✅
+  }
+
+  // Never go below 10001
+  if (nextSeq < 10001) nextSeq = 10001
+
+  return `${prefix}${nextSeq}`
 }
 
 // ============================================================
@@ -159,12 +210,8 @@ router.get('/next-item-no', protect, async (req, res) => {
 // ============================================================
 router.get('/next-bill-no', protect, async (req, res) => {
   try {
-    const { productCode, itemNo } = req.query
-    if (!productCode || !itemNo) {
-      return res.status(400).json({ message: 'productCode and itemNo required' })
-    }
-    const itemCode = buildItemCode(productCode, itemNo)
-    const billNo = await generateGarmentBillNo(itemCode)
+    // ✅ No productCode/itemNo needed anymore — bill no is month-based
+    const billNo = await generateGarmentBillNo()
     res.json({ billNo })
   } catch (err) {
     res.status(500).json({ message: err.message })
@@ -426,8 +473,7 @@ if (Number(variant.purchasePrice) > 0 && item.rate < variant.purchasePrice) {
     data.totalItems  = data.items.length
 
     // Bill No
-    const firstItemCode = data.items[0].itemCode
-    data.billNo = await generateGarmentBillNo(firstItemCode)
+    data.billNo = await generateGarmentBillNo()
 
     // Loyalty
     data.loyaltyPoints = 5
